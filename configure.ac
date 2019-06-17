@@ -33,8 +33,8 @@ AC_CHECK_LIB([trace], [trace_increment_packet_refcount],,libtrace_found=0)
 AC_CHECK_LIB([yaml], [yaml_document_get_node],,libyaml_found=0)
 AC_CHECK_LIB([zmq], [zmq_poll],libzmq_found=1,libzmq_found=0)
 AC_CHECK_LIB([m], [pow],,libm_found=0)
-AC_CHECK_LIB([ssl], [SSL_library_init],, libssl_found=0)
-AC_CHECK_LIB([crypto], [ERR_load_crypto_strings],, libcrypto_found=0)
+AC_CHECK_LIB([ssl], [OPENSSL_init_ssl],, libssl_found=0)
+AC_CHECK_LIB([crypto], [OPENSSL_init_crypto],, libcrypto_found=0)
 
 if test "x$libzmq_found" = "x1"; then
         COLLECTOR_LIBS="$COLLECTOR_LIBS -lzmq"
@@ -82,7 +82,7 @@ if test "$libtrace_found" = 0; then
 fi
 
 if test "$libssl_found" = 0; then
-        AC_MSG_ERROR(Required library libssl not found; use LDFLAGS to specify library location)
+        AC_MSG_ERROR(Required library libssl1.1.0 not found; use LDFLAGS to specify library location)
 fi
 
 if test "$libcrypto_found" = 0; then

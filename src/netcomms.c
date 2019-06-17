@@ -120,13 +120,13 @@ void dump_cert_info(SSL *ssl) {
 SSL_CTX * ssl_init(const char *cacertfile, const char *certfile, const char *keyfile) {
 
     /* SSL library initialisation */
-    SSL_library_init();
-    OpenSSL_add_all_algorithms();
-    SSL_load_error_strings();
-    ERR_load_crypto_strings();
+    //SSL_library_init();
+    //OpenSSL_add_all_algorithms();
+    //SSL_load_error_strings();
+    //ERR_load_crypto_strings();
     
     /* create the SSL context */
-    SSL_CTX *ctx = SSL_CTX_new(TLSv1_2_method());
+    SSL_CTX *ctx = SSL_CTX_new(TLS_method());
 
     if (!ctx){ //check not NULL
         logger(LOG_INFO, "OpenLI: SSL_CTX creation failed");

@@ -41,6 +41,27 @@
 #include "logger.h"
 #include "util.h"
 
+void openli_copy_ipcontent(libtrace_packet_t *pkt, uint8_t **ipc,
+        uint16_t *iplen) {
+
+    void *l3;
+    uint16_t ethertype;
+    uint32_t rem;
+
+    *ipc = NULL;
+    *iplen = 0;
+
+    l3 = trace_get_layer3(pkt, &ethertype, &rem);
+
+    if (l3 == NULL || rem == 0) {
+        return;
+    }
+
+	*ipc = malloc(rem);
+	memcpy(*ipc, l3, rem);
+	*iplen = rem;
+}
+
 int connect_socket(char *ipstr, char *portstr, uint8_t isretry,
         uint8_t setkeepalive) {
 
@@ -462,6 +483,58 @@ char *parse_iprange_string(char *ipr_str) {
     }
     return parsed;
 
+}
+
+/** Decodes the LIID field that is prepended to each exported ETSI
+ *  message by the collector.
+ *
+ *  Although the LIID is already present in the encoded ETSI, finding
+ *  and decoding it from within an ETSI record is slow. Since we need
+ *  it to know which agency to forward the record to, it is faster and
+ *  easier to just have the collector put a copy of it in front of
+ *  the record and read it straight from there.
+ *
+ *  @param etsimsg      A pointer to the start of the received ETSI
+ *                      record.
+ *  @param msglen       The length of the received ETSI record.
+ *  @param space        A string buffer to copy the extracted LIID into.
+ *  @param maxspace     The size of the 'space' buffer.
+ *  @param liidlen[out] Set to contain the number of bytes to skip to reach
+ *                      the start of the actual ETSI record.
+ *
+ *  @return a pointer to the first character of the extracted LIID.
+ */
+char *extract_liid_from_exported_msg(uint8_t *etsimsg,
+        uint16_t msglen, unsigned char *space, int maxspace,
+        uint16_t *liidlen) {
+
+    uint16_t l;
+
+    /* Format of the record with prepended LIID
+     *
+     * [ Length of LIID (2 bytes) ] | [ LIID ] | [ Actual ETSI record ]
+     */
+
+    /* LIID length is stored in network byte order */
+    l = *(uint16_t *)(etsimsg);
+    *liidlen = ntohs(l);
+
+    /* Bounds checking, both on the message and available storage space */
+    if (*liidlen > msglen - 2) {
+        *liidlen = msglen - 2;
+    }
+
+    if (*liidlen > maxspace - 1) {
+        *liidlen = maxspace - 1;
+    }
+
+    /* Copy the LIID into the storage space */
+    memcpy(space, etsimsg + 2, *liidlen);
+    space[*liidlen] = '\0';     // null-terminate!
+
+    /* Update LIID length to include the 2 bytes of length. */
+    *liidlen += sizeof(l);
+    return (char *)space;
 }
 
 // vim: set sw=4 tabstop=4 softtabstop=4 expandtab :

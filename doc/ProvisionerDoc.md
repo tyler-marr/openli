@@ -36,6 +36,13 @@ In addition to intercepts, the update socket can be used to manage the agencies
 that the OpenLI system will export intercepts to, as well as the set of
 known SIP and RADIUS servers on the network being monitored by OpenLI.
 
+If the provisioner has been configured to use TLS for internal communications,
+then the update socket will only accept connections over HTTPS. If you are
+using `curl` as a client to push commands to the update socket and have
+generated self-signed certificates for OpenLI, you will need to use the
+`--cacert` option (with the self-generated CA certificate) to allow `curl`
+to validate the provisioner's certificate.
+
 The running intercept config is stored in a file on disk. You may edit this
 file directly, but be warned that any changes to the file will only be
 applied when the OpenLI provisioner is restarted. In addition, the file is
@@ -47,10 +54,35 @@ intercepted traffic should be sent, be **very** careful about which hosts
 on your network can communicate with this socket.
 
 The update socket can be disabled by configuring it to listen on port 0.
-This will remove any capacity for the running intercept config to updated
-without having to restart the provisioner, but users who are concerned
-about having an open socket that can start, stop or modify intercepts may
-find this to be a preferable option.
+This will remove any capacity for the running intercept config to be updated
+without having to manually trigger a reload of the provisioner configuration,
+but users who are concerned about having an open socket that can start, stop or
+modify intercepts may find this to be a preferable option.
+
+#### Authentication for Provisioner Updates
+Optionally, you can configure the update socket to accept requests only from
+authenticated users. OpenLI supports two authentication mechanisms at present:
+API keys and Digest Authentication. Credentials for both methods are stored
+in an encrypted SQLite3 database (and therefore require OpenLI to be built
+with support for the `libsqlcipher` library) on the host that the provisioner
+is running on.
+
+Full documentation on the authentication system, how to enable it and how
+to add users to it can be found at:
+https://github.com/wanduow/openli/wiki/Authenticated-REST-API
+
+Users can authenticate by either including their API key in their HTTP
+requests (using the `X-API-KEY` header) or by performing standard Digest
+Authentication (as per RFC 2617) using their assigned username and password
+with the realm `provisioner@openli.nz`. If you are using `curl` as a client
+to communicate with the update socket, then you simply need to provide your
+username and password and set the `--digest` flag and curl will handle the
+rest of the authentication for you.
+
+Scripts to create the authentication database and add users to it are
+included with the OpenLI source code (in `src/provisioner/authsetup/`) and
+are installed by the Debian / RPM packages (into `/usr/sbin/`). See the
+aforementioned wiki page for more details on how to use these scripts.
 
 ### Agencies
 In this context, an agency refers to an LEA (Law Enforcement Agency) that
@@ -318,6 +350,15 @@ options:
 * `tlskey`      --  the location of the component's key file
 * `tlsca`       --  the location of the certificate file for the CA that signed
                     the certificates (i.e. openli-ca-crt.pem).
+
+
+To allow only authenticated users to modify the running intercept config
+using the REST API (update service), then you will need to provide the
+following options:
+
+* `restauthdb`  -- the SQLite3 database file where the authentication
+                   credentials are located
+* `restauthkey` -- the passphrase needed to decrypt the SQLite3 database
 
 
 ### Intercept Configuration Syntax

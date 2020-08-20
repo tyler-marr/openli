@@ -24,6 +24,7 @@
  *
  */
 
+#include "util.h"
 #include "logger.h"
 #include "intercept.h"
 
@@ -102,13 +103,15 @@ rtpstreaminf_t *create_rtpstream(voipintercept_t *vint, uint32_t cin) {
     newcin->targetaddr = NULL;
     newcin->otheraddr = NULL;
     newcin->ai_family = 0;
-    newcin->targetport = 0;
-    newcin->otherport = 0;
     newcin->seqno = 0;
     newcin->invitecseq = NULL;
     newcin->byecseq = NULL;
     newcin->timeout_ev = NULL;
     newcin->byematched = 0;
+
+    newcin->streamcount = 0;
+    newcin->mediastreams = calloc(RTP_STREAM_ALLOC,
+            sizeof(struct sipmediastream));
 
     if (vint->options & (1UL << OPENLI_VOIPINT_OPTION_IGNORE_COMFORT)) {
         newcin->skip_comfort = 1;
@@ -123,6 +126,7 @@ rtpstreaminf_t *create_rtpstream(voipintercept_t *vint, uint32_t cin) {
 
 rtpstreaminf_t *deep_copy_rtpstream(rtpstreaminf_t *orig) {
     rtpstreaminf_t *copy = NULL;
+    int i;
 
     copy = (rtpstreaminf_t *)malloc(sizeof(rtpstreaminf_t));
     if (!copy) {
@@ -151,9 +155,17 @@ rtpstreaminf_t *deep_copy_rtpstream(rtpstreaminf_t *orig) {
         return NULL;
     }
 
+    copy->streamcount = orig->streamcount;
+    copy->mediastreams = calloc(orig->streamcount,
+            sizeof(struct sipmediastream));
+    for (i = 0; i < copy->streamcount; i++) {
+        copy->mediastreams[i].targetport = orig->mediastreams[i].targetport;
+        copy->mediastreams[i].otherport = orig->mediastreams[i].otherport;
+        copy->mediastreams[i].mediatype =
+                strdup(orig->mediastreams[i].mediatype);
+    }
+
     memcpy(copy->otheraddr, orig->otheraddr, sizeof(struct sockaddr_storage));
-    copy->targetport = orig->targetport;
-    copy->otherport = orig->otherport;
     copy->skip_comfort = orig->skip_comfort;
     copy->seqno = 0;
     copy->active = 1;
@@ -342,6 +354,16 @@ void free_all_voipintercepts(voipintercept_t **vints) {
 }
 
 void free_single_rtpstream(rtpstreaminf_t *rtp) {
+    int i;
+
+    if (rtp->mediastreams) {
+        for (i = 0; i < rtp->streamcount; i++) {
+            free(rtp->mediastreams[i].mediatype);
+        }
+
+        free(rtp->mediastreams);
+    }
+
     free_intercept_common(&(rtp->common));
     if (rtp->targetaddr) {
         free(rtp->targetaddr);
@@ -373,9 +395,7 @@ vendmirror_intercept_t *create_vendmirror_intercept(ipintercept_t *ipint) {
         return NULL;
     }
 
-    jm->nextseqno = 0;
-    jm->cin = 0;
-    jm->interceptid = ipint->vendmirrorid;
+    jm->sessionid = ipint->vendmirrorid;
     copy_intercept_common(&(ipint->common), &(jm->common));
 
     return jm;
@@ -386,11 +406,18 @@ void free_single_vendmirror_intercept(vendmirror_intercept_t *jm) {
     free(jm);
 }
 
-void free_all_vendmirror_intercepts(vendmirror_intercept_t **jmints) {
+void free_all_vendmirror_intercepts(vendmirror_intercept_list_t **jmints) {
+
+    vendmirror_intercept_list_t *parent, *ptmp;
     vendmirror_intercept_t *jm, *tmp;
-    HASH_ITER(hh, *jmints, jm, tmp) {
-        HASH_DELETE(hh, *jmints, jm);
-        free_single_vendmirror_intercept(jm);
+    HASH_ITER(hh, *jmints, parent, ptmp) {
+
+        HASH_ITER(hh, parent->intercepts, jm, tmp) {
+            HASH_DELETE(hh, parent->intercepts, jm);
+            free_single_vendmirror_intercept(jm);
+        }
+        HASH_DELETE(hh, *jmints, parent);
+        free(parent);
     }
 }
 
@@ -440,7 +467,7 @@ void free_all_staticipsessions(staticipsession_t **statintercepts) {
 }
 
 ipsession_t *create_ipsession(ipintercept_t *ipint, uint32_t cin,
-        int ipfamily, struct sockaddr *assignedip) {
+        int ipfamily, struct sockaddr *assignedip, uint8_t prefixlen) {
 
     ipsession_t *ipsess;
 
@@ -452,6 +479,7 @@ ipsession_t *create_ipsession(ipintercept_t *ipint, uint32_t cin,
     ipsess->nextseqno = 0;
     ipsess->cin = cin;
     ipsess->ai_family = ipfamily;
+    ipsess->prefixlen = prefixlen;
     ipsess->targetip = (struct sockaddr_storage *)(malloc(
             sizeof(struct sockaddr_storage)));
     if (!ipsess->targetip) {
@@ -470,6 +498,7 @@ ipsession_t *create_ipsession(ipintercept_t *ipint, uint32_t cin,
         return NULL;
     }
     snprintf(ipsess->streamkey, 256, "%s-%u", ipint->common.liid, cin);
+
     return ipsess;
 }
 
@@ -554,12 +583,14 @@ int remove_intercept_from_user_intercept_list(user_intercept_list_t **ulist,
     HASH_FIND(hh, *ulist, ipint->username, ipint->username_len, found);
 
     if (!found) {
+        printf("!found: %s\n", ipint->username);
         return 0;
     }
 
     HASH_FIND(hh_user, found->intlist, ipint->common.liid,
             ipint->common.liid_len, existing);
     if (!existing) {
+        printf("!existing: %s\n", ipint->common.liid);
         return 0;
     }
 
@@ -573,6 +604,7 @@ int remove_intercept_from_user_intercept_list(user_intercept_list_t **ulist,
         free(found->username);
         free(found);
     }
+    printf("removed %s:%s\n", ipint->username, ipint->common.liid);
     return 0;
 }
 
@@ -601,6 +633,49 @@ uint32_t map_radius_ident_string(char *confstr) {
         return (1 << OPENLI_IPINT_OPTION_RADIUS_IDENT_USER);
     }
     return 0;
+}
+
+const char *get_radius_ident_string(uint32_t radoptions) {
+
+    if (radoptions == (1 << OPENLI_IPINT_OPTION_RADIUS_IDENT_CSID)) {
+        return "csid";
+    }
+
+    if (radoptions == (1 << OPENLI_IPINT_OPTION_RADIUS_IDENT_USER)) {
+        return "user";
+    }
+
+    return "any";
+}
+
+const char *get_access_type_string(internet_access_method_t method) {
+
+    switch(method) {
+        case INTERNET_ACCESS_TYPE_DIALUP:
+            return "dialup";
+        case INTERNET_ACCESS_TYPE_XDSL:
+            return "xDSL";
+        case INTERNET_ACCESS_TYPE_CABLEMODEM:
+            return "cable";
+        case INTERNET_ACCESS_TYPE_LAN:
+            return "LAN";
+        case INTERNET_ACCESS_TYPE_WIRELESS_LAN:
+            return "wifi";
+        case INTERNET_ACCESS_TYPE_FIBER:
+            return "fiber";
+        case INTERNET_ACCESS_TYPE_WIMAX:
+            return "wimax";
+        case INTERNET_ACCESS_TYPE_SATELLITE:
+            return "satellite";
+        case INTERNET_ACCESS_TYPE_MOBILE:
+            return "mobile";
+        case INTERNET_ACCESS_TYPE_WIRELESS_OTHER:
+            return "wireless-other";
+        default:
+            break;
+    }
+
+    return "undefined";
 }
 
 internet_access_method_t map_access_type_string(char *confstr) {

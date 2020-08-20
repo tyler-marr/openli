@@ -30,6 +30,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <amqp.h>
+#include <amqp_tcp_socket.h>
 
 #include "netcomms.h"
 #include "logger.h"
@@ -89,7 +91,6 @@ inline int fd_set_block(int fd){
 
 static inline int extend_net_buffer(net_buffer_t *nb, int musthave) {
 
-    int bufused = nb->alloced - NETBUF_SPACE_REM(nb);
     int frontfree = NETBUF_FRONT_FREE(nb);
     int contsize = NETBUF_CONTENT_SIZE(nb);
     char *tmp = NULL;
@@ -103,7 +104,6 @@ static inline int extend_net_buffer(net_buffer_t *nb, int musthave) {
             return 0;
         }
         frontfree = 0;
-        bufused = nb->alloced - NETBUF_SPACE_REM(nb);
     }
 
     tmp = (char *)realloc(nb->buf, nb->alloced + NETBUF_ALLOC_SIZE);
@@ -175,8 +175,8 @@ int construct_netcomm_protocol_header(ii_header_t *newhdr,
 static inline int push_tlv(net_buffer_t *nb, openli_proto_fieldtype_t type,
         uint8_t *value, uint16_t vallen) {
 
-    char tmp[4096];
-    char *ptr = tmp;
+    unsigned char tmp[4096];
+    unsigned char *ptr = tmp;
     uint16_t shorttype, swaplen;
 
     if (vallen > 4096 - 4) {
@@ -392,17 +392,17 @@ static int _push_ipintercept_modify(net_buffer_t *nb, ipintercept_t *ipint) {
 
     /* Push on each intercept field */
 
-    if (push_tlv(nb, OPENLI_PROTO_FIELD_LIID, ipint->common.liid,
+    if (push_tlv(nb, OPENLI_PROTO_FIELD_LIID, (uint8_t *)ipint->common.liid,
                 strlen(ipint->common.liid)) == -1) {
         goto pushmodfail;
     }
 
-    if (push_tlv(nb, OPENLI_PROTO_FIELD_AUTHCC, ipint->common.authcc,
+    if (push_tlv(nb, OPENLI_PROTO_FIELD_AUTHCC, (uint8_t *)ipint->common.authcc,
             strlen(ipint->common.authcc)) == -1) {
         goto pushmodfail;
     }
 
-    if (push_tlv(nb, OPENLI_PROTO_FIELD_USERNAME, ipint->username,
+    if (push_tlv(nb, OPENLI_PROTO_FIELD_USERNAME, (uint8_t *)ipint->username,
             ipint->username_len) == -1) {
         goto pushmodfail;
     }
@@ -471,12 +471,12 @@ static int _push_voipintercept_modify(net_buffer_t *nb, voipintercept_t *vint)
         goto pushmodfail;
     }
 
-    if (push_tlv(nb, OPENLI_PROTO_FIELD_LIID, vint->common.liid,
+    if (push_tlv(nb, OPENLI_PROTO_FIELD_LIID, (uint8_t *)vint->common.liid,
                 strlen(vint->common.liid)) == -1) {
         goto pushmodfail;
     }
 
-    if (push_tlv(nb, OPENLI_PROTO_FIELD_AUTHCC, vint->common.authcc,
+    if (push_tlv(nb, OPENLI_PROTO_FIELD_AUTHCC, (uint8_t *)vint->common.authcc,
             strlen(vint->common.authcc)) == -1) {
         goto pushmodfail;
     }
@@ -556,11 +556,13 @@ int push_intercept_withdrawal_onto_net_buffer(net_buffer_t *nb,
 
     /* Push on each intercept field */
 
-    if (push_tlv(nb, OPENLI_PROTO_FIELD_LIID, liid, strlen(liid)) == -1) {
+    if (push_tlv(nb, OPENLI_PROTO_FIELD_LIID, (uint8_t *)liid,
+            strlen(liid)) == -1) {
         goto pushwdfail;
     }
 
-    if (push_tlv(nb, OPENLI_PROTO_FIELD_AUTHCC, authcc, strlen(authcc)) == -1) {
+    if (push_tlv(nb, OPENLI_PROTO_FIELD_AUTHCC, (uint8_t *)authcc,
+            strlen(authcc)) == -1) {
         goto pushwdfail;
     }
 
@@ -598,22 +600,26 @@ int push_voipintercept_onto_net_buffer(net_buffer_t *nb, void *data) {
     }
 
     /* Push on each intercept field */
-    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_LIID, vint->common.liid,
+    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_LIID,
+            (uint8_t *)vint->common.liid,
             vint->common.liid_len)) == -1) {
         goto pushvoipintfail;
     }
 
-    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_AUTHCC, vint->common.authcc,
+    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_AUTHCC,
+            (uint8_t *)vint->common.authcc,
             vint->common.authcc_len)) == -1) {
         goto pushvoipintfail;
     }
 
-    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_DELIVCC, vint->common.delivcc,
+    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_DELIVCC,
+            (uint8_t *)vint->common.delivcc,
             vint->common.delivcc_len)) == -1) {
         goto pushvoipintfail;
     }
 
-    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_LEAID, vint->common.targetagency,
+    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_LEAID,
+            (uint8_t *)vint->common.targetagency,
             strlen(vint->common.targetagency))) == -1) {
         goto pushvoipintfail;
     }
@@ -683,19 +689,19 @@ static inline int push_sip_target_onto_net_buffer_generic(net_buffer_t *nb,
     }
 
     /* Push on each field */
-    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_LIID, vint->common.liid,
-            vint->common.liid_len)) == -1) {
+    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_LIID,
+            (uint8_t *)vint->common.liid, vint->common.liid_len)) == -1) {
         goto pushsiptargetfail;
     }
 
-    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_SIP_USER, sipid->username,
-            sipid->username_len)) == -1) {
+    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_SIP_USER,
+            (uint8_t *)sipid->username, sipid->username_len)) == -1) {
         goto pushsiptargetfail;
     }
 
     if (sipid->realm) {
         if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_SIP_REALM,
-                sipid->realm, sipid->realm_len)) == -1) {
+                (uint8_t *)sipid->realm, sipid->realm_len)) == -1) {
             goto pushsiptargetfail;
         }
     }
@@ -762,12 +768,13 @@ static int push_static_ipranges_generic(net_buffer_t *nb, ipintercept_t *ipint,
     }
 
     if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_STATICIP_RANGE,
-                    ipr->rangestr, strlen(ipr->rangestr))) == -1) {
+                    (uint8_t *)ipr->rangestr, strlen(ipr->rangestr))) == -1) {
         goto pushstaticipfail;
     }
 
     if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_LIID,
-                    ipint->common.liid, ipint->common.liid_len)) == -1) {
+                    (uint8_t *)ipint->common.liid,
+                    ipint->common.liid_len)) == -1) {
         goto pushstaticipfail;
     }
 
@@ -852,28 +859,31 @@ int push_ipintercept_onto_net_buffer(net_buffer_t *nb, void *data) {
     }
 
     /* Push on each intercept field */
-    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_LIID, ipint->common.liid,
+    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_LIID,
+            (uint8_t *)ipint->common.liid,
             ipint->common.liid_len)) == -1) {
         goto pushipintfail;
     }
 
-    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_AUTHCC, ipint->common.authcc,
+    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_AUTHCC,
+            (uint8_t *)ipint->common.authcc,
             ipint->common.authcc_len)) == -1) {
         goto pushipintfail;
     }
 
-    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_DELIVCC, ipint->common.delivcc,
+    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_DELIVCC,
+            (uint8_t *)ipint->common.delivcc,
             ipint->common.delivcc_len)) == -1) {
         goto pushipintfail;
     }
 
-    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_USERNAME, ipint->username,
-            ipint->username_len)) == -1) {
+    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_USERNAME,
+            (uint8_t *)ipint->username, ipint->username_len)) == -1) {
         goto pushipintfail;
     }
 
     if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_LEAID,
-            ipint->common.targetagency,
+            (uint8_t *)ipint->common.targetagency,
             strlen(ipint->common.targetagency))) == -1) {
         goto pushipintfail;
     }
@@ -953,13 +963,13 @@ static inline int push_mediator_msg_onto_net_buffer(net_buffer_t *nb,
         return -1;
     }
 
-    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_MEDIATORIP, med->ipstr,
-            strlen(med->ipstr))) == -1) {
+    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_MEDIATORIP,
+            (uint8_t *)med->ipstr, strlen(med->ipstr))) == -1) {
         return -1;
     }
 
-    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_MEDIATORPORT, med->portstr,
-            strlen(med->portstr))) == -1) {
+    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_MEDIATORPORT,
+            (uint8_t *)med->portstr, strlen(med->portstr))) == -1) {
         return -1;
     }
 
@@ -1065,14 +1075,14 @@ static int push_coreserver_msg_onto_net_buffer(net_buffer_t *nb,
         return -1;
     }
 
-    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_CORESERVER_IP, cs->ipstr,
-            strlen(cs->ipstr))) == -1) {
+    if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_CORESERVER_IP,
+            (uint8_t *)cs->ipstr, strlen(cs->ipstr))) == -1) {
         return -1;
     }
 
     if (cs->portstr) {
-        if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_CORESERVER_PORT, cs->portstr,
-                strlen(cs->portstr))) == -1) {
+        if ((ret = push_tlv(nb, OPENLI_PROTO_FIELD_CORESERVER_PORT,
+                (uint8_t *)cs->portstr, strlen(cs->portstr))) == -1) {
             return -1;
         }
     }
@@ -1173,7 +1183,7 @@ static openli_proto_msgtype_t parse_received_message(net_buffer_t *nb,
     hdr = (ii_header_t *)(nb->actptr);
 
     if (ntohl(hdr->magic) != OPENLI_PROTO_MAGIC) {
-        dump_buffer_contents(nb->actptr, 64);
+        dump_buffer_contents((uint8_t *)nb->actptr, 64);
         return OPENLI_PROTO_INVALID_MESSAGE;
     }
 
@@ -1221,10 +1231,12 @@ static int decode_tlv(uint8_t *start, uint8_t *end,
     return 0;
 }
 
-#define DECODE_STRING_FIELD(target, valptr, vallen) \
-    target = (char *)malloc(vallen + 1); \
-    memcpy(target, valptr, vallen); \
-    (target)[vallen] = '\0';
+#define DECODE_STRING_FIELD(target, valptr, vallen)  \
+    do { \
+        target = (char *)malloc(vallen + 1); \
+        memcpy(target, valptr, vallen); \
+        (target)[vallen] = '\0'; \
+    } while (0);
 
 int decode_voipintercept_start(uint8_t *msgbody, uint16_t len,
         voipintercept_t *vint) {
@@ -1553,7 +1565,7 @@ int decode_default_radius_announcement(uint8_t *msgbody, uint16_t len,
             if (defuser->name) {
                 free(defuser->name);
             }
-            defuser->name = DECODE_STRING_FIELD(defuser->name, valptr, vallen);
+            DECODE_STRING_FIELD(defuser->name, valptr, vallen);
             defuser->namelen = strlen(defuser->name);
         }
 
@@ -1735,7 +1747,6 @@ int decode_cease_mediation(uint8_t *msgbody, uint16_t len, char **liid) {
 openli_proto_msgtype_t receive_net_buffer(net_buffer_t *nb, uint8_t **msgbody,
         uint16_t *msglen, uint64_t *intid) {
 
-    ii_header_t *hdr;
     openli_proto_msgtype_t rettype;
     int ret;
 
@@ -1778,6 +1789,128 @@ openli_proto_msgtype_t receive_net_buffer(net_buffer_t *nb, uint8_t **msgbody,
     }
 
     nb->appendptr += ret;
+
+    rettype = parse_received_message(nb, msgbody, msglen, intid);
+    return rettype;
+}
+
+
+//Check the RMQ connection for new frames/messages, new messages will be placed
+//inside the netbuffer 
+openli_proto_msgtype_t receive_RMQ_buffer(net_buffer_t *nb, 
+        amqp_connection_state_t amqp_state, 
+        uint8_t **msgbody, uint16_t *msglen, uint64_t *intid) {
+
+    amqp_frame_t frame;
+    amqp_rpc_reply_t ret;
+    amqp_envelope_t envelope;
+
+    openli_proto_msgtype_t rettype;
+    ii_header_t *hdr;
+
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 10;
+
+    if (nb == NULL) {
+        return OPENLI_PROTO_NULL_BUFFER;
+    }
+
+    if (nb->buftype != NETBUF_RECV) {
+        return OPENLI_PROTO_WRONG_BUFFER_TYPE;
+    }
+
+    rettype = parse_received_message(nb, msgbody, msglen, intid);
+    if (rettype != OPENLI_PROTO_NO_MESSAGE) {
+        return rettype;
+    }
+
+    amqp_maybe_release_buffers(amqp_state);
+    ret = amqp_consume_message(amqp_state, &envelope, &tv, 0);
+
+    if (AMQP_RESPONSE_NORMAL != ret.reply_type) {
+        if (AMQP_RESPONSE_LIBRARY_EXCEPTION == ret.reply_type &&
+                AMQP_STATUS_UNEXPECTED_STATE == ret.library_error) {
+            if (AMQP_STATUS_OK != amqp_simple_wait_frame(amqp_state, &frame)) {
+                return OPENLI_PROTO_NO_MESSAGE;
+            }
+
+            if (AMQP_FRAME_METHOD == frame.frame_type) {
+                switch (frame.payload.method.id) {
+                    case AMQP_BASIC_ACK_METHOD: 
+                        /* if we've turned publisher confirms on, and we've published a
+                        * message here is a message being confirmed.
+                        */
+                        logger(LOG_INFO, "basic ack");
+                        //break;
+                        return OPENLI_PROTO_NO_MESSAGE;
+                    case AMQP_BASIC_RETURN_METHOD:
+                        /* if a published message couldn't be routed and the mandatory
+                        * flag was set this is what would be returned. The message then
+                        * needs to be read.
+                        */
+                        {
+                            amqp_message_t message;
+                            ret = amqp_read_message(amqp_state, frame.channel, &message, 0);
+                            if (AMQP_RESPONSE_NORMAL != ret.reply_type) {
+                                return OPENLI_PROTO_RECV_ERROR;
+                            }
+                            amqp_destroy_message(&message);
+                        }
+
+                        //break;
+                        return OPENLI_PROTO_NO_MESSAGE;
+
+                    case AMQP_CHANNEL_CLOSE_METHOD:
+                        /* a channel.close method happens when a channel exception occurs,
+                        * this can happen by publishing to an exchange that doesn't exist
+                        * for example.
+                        *
+                        * In this case you would need to open another channel redeclare
+                        * any queues that were declared auto-delete, and restart any
+                        * consumers that were attached to the previous channel.
+                        */
+                        logger(LOG_INFO, "OpenLI: RMQ Channel closed");
+                        return OPENLI_PROTO_RECV_ERROR;
+
+                    case AMQP_CONNECTION_CLOSE_METHOD:
+                        /* a connection.close method happens when a connection exception
+                        * occurs, this can happen by trying to use a channel that isn't
+                        * open for example.
+                        *
+                        * In this case the whole connection must be restarted.
+                        */
+                        return OPENLI_PROTO_PEER_DISCONNECTED;
+
+                    default:
+                        logger(LOG_INFO, "An unexpected method was received %u\n",
+                        frame.payload.method.id);
+                        return OPENLI_PROTO_RECV_ERROR;
+                }
+            }
+        }
+    }
+    else {
+        if (amqp_basic_ack (amqp_state,
+                envelope.channel,
+                envelope.delivery_tag,
+                0) != 0 ) {
+            logger(LOG_INFO, "OpenLI: RMQ error in basic acknowledgement");
+        }
+    }
+
+    /* Ensure the buffer is big enough to hold the new message. */
+    if (NETBUF_SPACE_REM(nb) < envelope.message.body.len) {
+        if (extend_net_buffer(nb, envelope.message.body.len) == -1) {
+            return OPENLI_PROTO_BUFFER_TOO_FULL;
+        }
+    }
+
+    memcpy(nb->appendptr, 
+            envelope.message.body.bytes,
+            envelope.message.body.len);
+    nb->appendptr += envelope.message.body.len;
+    amqp_destroy_envelope(&envelope);
 
     rettype = parse_received_message(nb, msgbody, msglen, intid);
     return rettype;

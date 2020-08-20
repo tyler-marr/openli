@@ -90,7 +90,6 @@ static int parse_input_config(collector_global_t *glob, yaml_document_t *doc,
         yaml_node_t *inputs) {
 
     yaml_node_item_t *item;
-    int i;
 
     for (item = inputs->data.sequence.items.start;
             item != inputs->data.sequence.items.top; item ++) {
@@ -106,6 +105,7 @@ static int parse_input_config(collector_global_t *glob, yaml_document_t *doc,
         inp->pktcbs = NULL;
         inp->running = 0;
         inp->report_drops = 1;
+        inp->hasher_apply = OPENLI_HASHER_BIDIR;
 
         /* Mappings describe the parameters for each input */
         for (pair = node->data.mapping.pairs.start;
@@ -137,6 +137,23 @@ static int parse_input_config(collector_global_t *glob, yaml_document_t *doc,
                     strcmp((char *)key->data.scalar.value, "threads") == 0) {
                 inp->threadcount = strtoul(
                         (char *)value->data.scalar.value, NULL, 10);
+            }
+
+            if (key->type == YAML_SCALAR_NODE &&
+                    value->type == YAML_SCALAR_NODE &&
+                    strcmp((char *)key->data.scalar.value, "hasher") == 0) {
+                if (strcasecmp((char *)value->data.scalar.value,
+                        "balanced") == 0) {
+                    inp->hasher_apply = OPENLI_HASHER_BALANCE;
+                } else if (strcasecmp((char *)value->data.scalar.value,
+                        "bidirectional") == 0) {
+                    inp->hasher_apply = OPENLI_HASHER_BIDIR;
+                } else if (strcasecmp((char *)value->data.scalar.value,
+                        "radius") == 0) {
+                    inp->hasher_apply = OPENLI_HASHER_RADIUS;
+                } else {
+                    logger(LOG_INFO, "OpenLI: unexpected hasher type '%s' in config, ignoring.", (char *)value->data.scalar.value);
+                }
             }
         }
         if (!inp->uri) {
@@ -220,7 +237,7 @@ static int parse_defradusers_list(prov_intercept_conf_t *state,
 
         defuser->name = strdup((char *)node->data.scalar.value);
         defuser->namelen = strlen(defuser->name);
-        defuser->awaitingconfirm = 0;
+        defuser->awaitingconfirm = 1;
 
         HASH_FIND(hh, state->defradusers, defuser->name, defuser->namelen,
                 found);
@@ -250,7 +267,6 @@ static int parse_core_server_list(coreserver_t **servlist, uint8_t cstype,
         yaml_node_t *node = yaml_document_get_node(doc, *item);
         yaml_node_pair_t *pair;
         coreserver_t *cs;
-        char keyspace[256];
 
         cs = (coreserver_t *)calloc(1, sizeof(coreserver_t));
 
@@ -456,7 +472,7 @@ static int parse_agency_list(prov_intercept_conf_t *state, yaml_document_t *doc,
         }
 
         if (newag->hi2_ipstr != NULL && newag->hi2_portstr != NULL &&
-                newag->hi3_ipstr != NULL && newag->hi3_portstr != NULL &
+                newag->hi3_ipstr != NULL && newag->hi3_portstr != NULL &&
                 newag->agencyid != NULL) {
             prov_agency_t *prov_ag;
             prov_ag = (prov_agency_t *)malloc(sizeof(prov_agency_t));
@@ -477,7 +493,6 @@ static int parse_voipintercept_list(voipintercept_t **voipints,
         yaml_document_t *doc, yaml_node_t *inputs) {
 
     yaml_node_item_t *item;
-    int i;
 
     for (item = inputs->data.sequence.items.start;
             item != inputs->data.sequence.items.top; item ++) {
@@ -580,7 +595,6 @@ static int parse_ipintercept_list(ipintercept_t **ipints, yaml_document_t *doc,
         yaml_node_t *inputs) {
 
     yaml_node_item_t *item;
-    int i;
 
     for (item = inputs->data.sequence.items.start;
             item != inputs->data.sequence.items.top; item ++) {
@@ -742,7 +756,7 @@ static int parse_ipintercept_list(ipintercept_t **ipints, yaml_document_t *doc,
 
 static int yaml_parser(char *configfile, void *arg,
         int (*parse_mapping)(void *, yaml_document_t *, yaml_node_t *,
-                yaml_node_t *)) {
+                yaml_node_t *), int createifmissing) {
     FILE *in = NULL;
     yaml_parser_t parser;
     yaml_document_t document;
@@ -750,7 +764,13 @@ static int yaml_parser(char *configfile, void *arg,
     yaml_node_pair_t *pair;
     int ret = -1;
 
-    if ((in = fopen(configfile, "r")) == NULL) {
+    in = fopen(configfile, "r");
+
+    if (in == NULL && errno == ENOENT && createifmissing) {
+        in = fopen(configfile, "w+");
+    }
+
+    if (in == NULL) {
         logger(LOG_INFO, "OpenLI: Failed to open config file: %s",
                 strerror(errno));
         return -1;
@@ -947,7 +967,13 @@ static int global_parser(void *arg, yaml_document_t *doc,
     if (key->type == YAML_SCALAR_NODE &&
             value->type == YAML_SCALAR_NODE &&
             strcmp((char *)key->data.scalar.value, "etsitls") == 0) {
-            glob->etsitls = check_onoff(value->data.scalar.value);
+        glob->etsitls = check_onoff((char *)value->data.scalar.value);
+    }
+
+    if (key->type == YAML_SCALAR_NODE &&
+            value->type == YAML_SCALAR_NODE &&
+            strcmp((char *)key->data.scalar.value, "sipignoresdpo") == 0) {
+        glob->ignore_sdpo_matches = check_onoff((char *)value->data.scalar.value);
     }
 
     if (key->type == YAML_SCALAR_NODE &&
@@ -959,7 +985,7 @@ static int global_parser(void *arg, yaml_document_t *doc,
   * Still TODO:
   *   BER encoding for IPIRIs, UMTSIRIs and UMTSCCs
   */
-#if 0
+#if 1
         if (strcasecmp(value->data.scalar.value, "BER") == 0) {
 #ifdef HAVE_BER_ENCODING
             glob->encoding_method = OPENLI_ENCODING_BER;
@@ -971,6 +997,44 @@ static int global_parser(void *arg, yaml_document_t *doc,
             glob->encoding_method = OPENLI_ENCODING_DER;
         }
 #endif
+    }
+
+    if (key->type == YAML_SCALAR_NODE &&
+            value->type == YAML_SCALAR_NODE &&
+            strcmp((char *)key->data.scalar.value, "RMQname") == 0) {
+        SET_CONFIG_STRING_OPTION(glob->RMQ_conf.name, value);
+    }
+
+    if (key->type == YAML_SCALAR_NODE &&
+            value->type == YAML_SCALAR_NODE &&
+            strcmp((char *)key->data.scalar.value, "RMQpass") == 0) {
+        SET_CONFIG_STRING_OPTION(glob->RMQ_conf.pass, value);
+    }
+
+    if (key->type == YAML_SCALAR_NODE &&
+            value->type == YAML_SCALAR_NODE &&
+            strcmp((char *)key->data.scalar.value, "RMQhostname") == 0) {
+        SET_CONFIG_STRING_OPTION(glob->RMQ_conf.hostname, value);
+    }
+
+    if (key->type == YAML_SCALAR_NODE &&
+            value->type == YAML_SCALAR_NODE &&
+            strcmp((char *)key->data.scalar.value, "RMQheartbeatfreq") == 0) {
+        glob->RMQ_conf.heartbeatFreq = strtoul((char *)value->data.scalar.value,
+                NULL, 10);
+    }
+
+    if (key->type == YAML_SCALAR_NODE &&
+            value->type == YAML_SCALAR_NODE &&
+            strcmp((char *)key->data.scalar.value, "RMQenabled") == 0) {
+        glob->RMQ_conf.enabled = check_onoff(value->data.scalar.value);
+    }
+
+    if (key->type == YAML_SCALAR_NODE &&
+            value->type == YAML_SCALAR_NODE &&
+            strcmp((char *)key->data.scalar.value, "RMQport") == 0) {
+        glob->RMQ_conf.port = strtoul((char *)value->data.scalar.value,
+                NULL, 10);
     }
     
     return 0;
@@ -997,13 +1061,13 @@ static int mediator_parser(void *arg, yaml_document_t *doc,
     if (key->type == YAML_SCALAR_NODE &&
             value->type == YAML_SCALAR_NODE &&
             strcmp((char *)key->data.scalar.value, "provisionerport") == 0) {
-        SET_CONFIG_STRING_OPTION(state->provport, value);
+        SET_CONFIG_STRING_OPTION(state->provisioner.provport, value);
     }
 
     if (key->type == YAML_SCALAR_NODE &&
             value->type == YAML_SCALAR_NODE &&
             strcmp((char *)key->data.scalar.value, "provisioneraddr") == 0) {
-        SET_CONFIG_STRING_OPTION(state->provaddr, value);
+        SET_CONFIG_STRING_OPTION(state->provisioner.provaddr, value);
     }
 
     if (key->type == YAML_SCALAR_NODE &&
@@ -1061,7 +1125,51 @@ static int mediator_parser(void *arg, yaml_document_t *doc,
     if (key->type == YAML_SCALAR_NODE &&
             value->type == YAML_SCALAR_NODE &&
             strcmp((char *)key->data.scalar.value, "etsitls") == 0) {
-            state->etsitls = check_onoff(value->data.scalar.value);
+            state->etsitls = check_onoff((char *)value->data.scalar.value);
+    }
+
+    if (key->type == YAML_SCALAR_NODE &&
+            value->type == YAML_SCALAR_NODE &&
+            strcmp((char *)key->data.scalar.value, "RMQname") == 0) {
+        SET_CONFIG_STRING_OPTION(state->RMQ_conf.name, value);
+    }
+
+    if (key->type == YAML_SCALAR_NODE &&
+            value->type == YAML_SCALAR_NODE &&
+            strcmp((char *)key->data.scalar.value, "RMQpass") == 0) {
+        SET_CONFIG_STRING_OPTION(state->RMQ_conf.pass, value);
+    }
+
+    if (key->type == YAML_SCALAR_NODE &&
+            value->type == YAML_SCALAR_NODE &&
+            strcmp((char *)key->data.scalar.value, "RMQhostname") == 0) {
+        SET_CONFIG_STRING_OPTION(state->RMQ_conf.hostname, value);
+    }
+
+    if (key->type == YAML_SCALAR_NODE &&
+            value->type == YAML_SCALAR_NODE &&
+            strcmp((char *)key->data.scalar.value, "RMQheartbeatfreq") == 0) {
+        state->RMQ_conf.heartbeatFreq = strtoul((char *)value->data.scalar.value,
+                NULL, 10);
+    }
+
+    if (key->type == YAML_SCALAR_NODE &&
+            value->type == YAML_SCALAR_NODE &&
+            strcmp((char *)key->data.scalar.value, "RMQenabled") == 0) {
+        state->RMQ_conf.enabled = check_onoff(value->data.scalar.value);
+    }
+
+    if (key->type == YAML_SCALAR_NODE &&
+            value->type == YAML_SCALAR_NODE &&
+            strcmp((char *)key->data.scalar.value, "RMQSSL") == 0) {
+        state->RMQ_conf.SSLenabled = check_onoff(value->data.scalar.value);
+    }
+
+    if (key->type == YAML_SCALAR_NODE &&
+            value->type == YAML_SCALAR_NODE &&
+            strcmp((char *)key->data.scalar.value, "RMQport") == 0) {
+        state->RMQ_conf.port = strtoul((char *)value->data.scalar.value,
+                NULL, 10);
     }
 
     return 0;
@@ -1209,23 +1317,35 @@ static int provisioning_parser(void *arg, yaml_document_t *doc,
         SET_CONFIG_STRING_OPTION(state->sslconf.cacertfile, value);
     }
 
+    if (key->type == YAML_SCALAR_NODE &&
+            value->type == YAML_SCALAR_NODE &&
+            strcmp((char *)key->data.scalar.value, "restauthdb") == 0) {
+        SET_CONFIG_STRING_OPTION(state->restauthdbfile, value);
+    }
+
+    if (key->type == YAML_SCALAR_NODE &&
+            value->type == YAML_SCALAR_NODE &&
+            strcmp((char *)key->data.scalar.value, "restauthkey") == 0) {
+        SET_CONFIG_STRING_OPTION(state->restauthkey, value);
+    }
+
     return 0;
 }
 
 int parse_intercept_config(char *configfile, prov_intercept_conf_t *conf) {
-    return yaml_parser(configfile, conf, intercept_parser);
+    return yaml_parser(configfile, conf, intercept_parser, 1);
 }
 
 int parse_collector_config(char *configfile, collector_global_t *glob) {
-    return yaml_parser(configfile, glob, global_parser);
+    return yaml_parser(configfile, glob, global_parser, 0);
 }
 
 int parse_provisioning_config(char *configfile, provision_state_t *state) {
 
-    return yaml_parser(configfile, state, provisioning_parser);
+    return yaml_parser(configfile, state, provisioning_parser, 0);
 }
 
 int parse_mediator_config(char *configfile, mediator_state_t *state) {
-    return yaml_parser(configfile, state, mediator_parser);
+    return yaml_parser(configfile, state, mediator_parser, 0);
 }
 // vim: set sw=4 tabstop=4 softtabstop=4 expandtab :

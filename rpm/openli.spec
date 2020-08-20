@@ -1,5 +1,5 @@
 Name:           openli
-Version:        1.0.3
+Version:        1.0.6
 Release:        1%{?dist}
 Summary:        Software for performing ETSI-compliant lawful intercept
 
@@ -14,7 +14,7 @@ BuildRequires: bison
 BuildRequires: doxygen
 BuildRequires: flex
 BuildRequires: libyaml-devel
-BuildRequires: libtrace4-devel
+BuildRequires: libtrace4-devel >= 4.0.14
 BuildRequires: Judy-devel
 BuildRequires: uthash-devel
 BuildRequires: libwandder1-devel
@@ -25,12 +25,17 @@ BuildRequires: openssl-devel
 BuildRequires: json-c-devel
 BuildRequires: libmicrohttpd-devel
 BuildRequires: systemd
+BuildRequires: sqlcipher-devel
+BuildRequires: librabbitmq-devel
 
 %description
 Software for performing ETSI-compliant lawful intercept
 
 %package        provisioner
 Summary:        Central provisioning daemon for an OpenLI system
+Requires:       rsyslog
+Requires:       bash
+Requires:       sqlcipher
 
 %description provisioner
 OpenLI is a software suite that allows network operators to conduct
@@ -45,6 +50,7 @@ and mediators.
 
 %package        mediator
 Summary:        Mediation daemon for an OpenLI system
+Requires:       rsyslog
 
 %description mediator
 OpenLI is a software suite that allows network operators to conduct
@@ -59,6 +65,8 @@ interface 2 and 3, using keep-alives as per the ETSI standard.
 
 %package        collector
 Summary:        Collector daemon for an OpenLI system
+Requires:       rsyslog
+Requires:       rabbitmq-server
 
 %description collector
 OpenLI is a software suite that allows network operators to conduct
@@ -91,6 +99,19 @@ find $RPM_BUILD_ROOT -name '*.la' -exec rm -f {} ';'
 %post provisioner
 if [ $1 -eq 1 ]; then
         /bin/systemctl enable openli-provisioner.service openli-provisioner.socket >/dev/null 2>&1 || :
+
+        # Set provisioner config examples to be 0640, so if a user copies
+        # them to create their own config then they won't be readable by
+        # everyone
+        chmod 0640 /etc/openli/provisioner-example.yaml
+        chmod 0640 /etc/openli/running-intercept-example.yaml
+
+        # Create provisioner auth database
+        DBPHRASE=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
+        mkdir -p /var/lib/openli
+        /usr/sbin/openli-prov-authsetup.sh ${DBPHRASE} /var/lib/openli/provauth.db
+        echo ${DBPHRASE} > /etc/openli/provauthdb.phrase
+        chmod 0640 /etc/openli/provauthdb.phrase
 fi
 
 %preun provisioner
@@ -98,6 +119,10 @@ if [ $1 -eq 0 ]; then
         # Disable and stop the units
         /bin/systemctl disable openli-provisioner.service openli-provisioner.socket >/dev/null 2>&1 || :
         /bin/systemctl stop openli-provisioner.service openli-provisioner.socket >/dev/null 2>&1 || :
+
+        # Remove provisioner auth database
+        rm -f /var/lib/openli/provauth.db
+        rm -f /etc/openli/provauthdb.phrase
 fi
 
 %postun provisioner
@@ -106,6 +131,7 @@ if [ $1 -ge 1 ]; then
         /bin/systemctl daemon-reload >/dev/null 2>&1 || :
         # On upgrade, restart the daemon
         /bin/systemctl try-restart openli-provisioner.service >/dev/null 2>&1 || :
+
 fi
 
 %post mediator
@@ -150,6 +176,8 @@ fi
 
 %files provisioner
 %{_bindir}/openliprovisioner
+%{_sbindir}/openli-prov-adduser.sh
+%{_sbindir}/openli-prov-authsetup.sh
 %{_unitdir}/openli-provisioner.service
 %config %{_sysconfdir}/rsyslog.d/10-openli-provisioner.conf
 %config %{_sysconfdir}/openli/provisioner-example.yaml
@@ -173,6 +201,18 @@ fi
 
 
 %changelog
+* Fri Jul 24 2020 Shane Alcock <salcock@waikato.ac.nz> - 1.0.6-1
+- Updated for 1.0.6 release
+
+* Thu May 28 2020 Shane Alcock <salcock@waikato.ac.nz> - 1.0.5-2
+- Add explicit rsyslog dependency to each component package
+
+* Fri May 8 2020 Shane Alcock <salcock@waikato.ac.nz> - 1.0.5-1
+- Updated for 1.0.5 release
+
+* Mon Jan 13 2020 Shane Alcock <salcock@waikato.ac.nz> - 1.0.4-1
+- Updated for 1.0.4 release
+
 * Fri Aug 16 2019 Shane Alcock <salcock@waikato.ac.nz> - 1.0.3-1
 - Updated for 1.0.3 release
 

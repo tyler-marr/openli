@@ -33,11 +33,13 @@
 #include <libwandder.h>
 #include <zmq.h>
 #include <Judy.h>
+#include <amqp.h>
 
 #include "export_shared.h"
 #include "etsili_core.h"
 #include "collector_publish.h"
 #include "export_buffer.h"
+#include "openli_tls.h"
 
 typedef struct export_dest {
     int failmsg;
@@ -54,6 +56,8 @@ typedef struct export_dest {
     SSL *ssl;
     int waitingforhandshake;
     int ssllasterror;
+
+    amqp_bytes_t rmq_queueid;
 
     UT_hash_handle hh_fd;
     UT_hash_handle hh_medid;
@@ -100,6 +104,7 @@ typedef struct sync_thread_global {
     void *collector_queues;
     void *epollevs;
     int epoll_fd;
+    int total_col_threads;
 
     pthread_mutex_t *stats_mutex;
     collector_stats_t *stats;
@@ -145,6 +150,9 @@ typedef struct seqtracker_thread_data {
     exporter_intercept_state_t *intercepts;
     removed_intercept_t *removedints;
     uint8_t encoding_method;
+#if HAVE_BER_ENCODING
+    wandder_encoder_ber_t *enc_ber;
+#endif
 
 } seqtracker_thread_data_t;
 
@@ -180,6 +188,7 @@ typedef struct forwarding_thread_data {
 
     int conntimerfd;
     int flagtimerfd;
+    uint8_t forcesend_rmq;
 
     Pvoid_t destinations_by_fd;
     Pvoid_t destinations_by_id;
@@ -189,6 +198,10 @@ typedef struct forwarding_thread_data {
 
     SSL_CTX *ctx;
     pthread_mutex_t sslmutex;
+
+    amqp_connection_state_t ampq_conn;
+    amqp_socket_t *ampq_sock;
+    openli_RMQ_config_t RMQ_conf;
 
 } forwarding_thread_data_t;
 
@@ -213,8 +226,8 @@ typedef struct encoder_state {
 typedef struct encoder_job {
     wandder_encode_job_t *preencoded;
 #ifdef HAVE_BER_ENCODING
-    wandder_buf_t **preencoded_ber;
     wandder_etsili_top_t *top;
+    wandder_etsili_child_t *child;
 #endif
     uint32_t seqno;
     char *cinstr;

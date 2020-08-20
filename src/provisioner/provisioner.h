@@ -27,14 +27,21 @@
 #ifndef OPENLI_PROVISIONER_H_
 #define OPENLI_PROVISIONER_H_
 
+#include "config.h"
+
 #include <libtrace/linked_list.h>
 #include <uthash.h>
 #include <microhttpd.h>
+
+#ifdef HAVE_SQLCIPHER
+#include <sqlcipher/sqlite3.h>
+#endif
+
 #include "netcomms.h"
 #include "util.h"
 #include "openli_tls.h"
 
-#define DEFAULT_INTERCEPT_CONFIG_FILE "/var/lib/openli/intercepts.conf"
+#define DEFAULT_INTERCEPT_CONFIG_FILE "/etc/openli/running-intercept-config.yaml"
 
 #ifndef MHD_SOCKET_DEFINED
 typedef int MHD_socket;
@@ -124,6 +131,10 @@ typedef struct prov_sock_state prov_sock_state_t;
  */
 struct prov_client {
 
+    char *identifier;
+
+    int clientrole;
+
     /** Epoll event for the main communication socket */
     prov_epoll_ev_t *commev;
 
@@ -145,6 +156,8 @@ struct prov_client {
     /** Flag to indicate whether our last connection failed for a non-SSL
      *  reason */
     uint8_t lastothererror;
+
+    UT_hash_handle hh;
 };
 
 /* Describes a collector that is being served by the provisioner */
@@ -153,7 +166,7 @@ typedef struct prov_collector {
     char *identifier;
 
     /** Common "client" state */
-    prov_client_t client;
+    prov_client_t *client;
 
     UT_hash_handle hh;
 } prov_collector_t;
@@ -161,10 +174,10 @@ typedef struct prov_collector {
 /* Describes a mediator that is being served by the provisioner */
 typedef struct prov_mediator {
 
-    /** Unique identifier for the mediator (using the IP address for now) */
-    char *identifier;
+    /** Unique identifier for the mediator */
+    uint32_t mediatorid;
     /** Common "client" state */
-    prov_client_t client;
+    prov_client_t *client;
 
     /** The IP address and port that the mediator is listening on for
      *  connections from collectors */
@@ -191,9 +204,17 @@ typedef struct prov_intercept_conf {
     /** A set of default RADIUS user names */
     default_radius_user_t *defradusers;
 
+    int destroy_pending;
     /** A mutex to protect the intercept config from race conditions */
     pthread_mutex_t safelock;
 } prov_intercept_conf_t;
+
+typedef struct mediator_address {
+    char *ipportstr;
+    uint32_t medid;
+
+    UT_hash_handle hh;
+} mediator_address_t;
 
 /** Global state for the provisioner instance */
 typedef struct prov_state {
@@ -218,7 +239,11 @@ typedef struct prov_state {
     /** The file descriptor that is used for polling using epoll */
     int epoll_fd;
 
-    /** The set of mediators that we are managing */
+    prov_client_t *pendingclients;
+
+    mediator_address_t *knownmeds;
+
+    /** The set of mediators that we are managing, keyed by mediator ID */
     prov_mediator_t *mediators;
 
     /** The set of collectors that we are managing */
@@ -236,8 +261,16 @@ typedef struct prov_state {
     prov_epoll_ev_t *signalfd;
 
     prov_intercept_conf_t interceptconf;
+
+    char *key_pem;
+    char *cert_pem;
     struct MHD_Daemon *updatedaemon;
     MHD_socket updatesockfd;
+
+    uint8_t restauthenabled;
+    char *restauthdbfile;
+    char *restauthkey;
+    void *authdb;
 
     /** A flag indicating whether collectors should ignore RTP comfort noise
      *  packets when intercepting voice traffic.
@@ -251,7 +284,7 @@ typedef struct prov_state {
 
 /** Socket state information for a single client */
 struct prov_sock_state {
-    /** The IP address of the client, used for identification purposes */
+    /** The IP address and port of the client, used for identification */
     char *ipaddr;
 
     /** A flag indicating whether we should log errors that occur when
@@ -264,6 +297,8 @@ struct prov_sock_state {
     /** Buffer for storing messages that are to be sent to the client */
     net_buffer_t *outgoing;
 
+    void *parent;
+
     /** Set to 1 if the client has authenticated, 0 otherwise */
     uint8_t trusted;
 
@@ -274,8 +309,25 @@ struct prov_sock_state {
     int clientrole;
 };
 
+/* Implemented in provisioner.c, but included here to be available
+ * inside hup_reload.c
+ */
+int init_prov_state(provision_state_t *state, char *configfile);
+void clear_prov_state(provision_state_t *state);
+void free_all_mediators(int epollfd, prov_mediator_t **mediators,
+        mediator_address_t **knownmeds);
+void stop_all_collectors(int epollfd, prov_collector_t **collectors);
+int start_main_listener(provision_state_t *state);
+int start_mediator_listener(provision_state_t *state);
+void start_mhd_daemon(provision_state_t *state);
+void clear_intercept_state(prov_intercept_conf_t *conf);
+void init_intercept_config(prov_intercept_conf_t *conf);
+int map_intercepts_to_leas(prov_intercept_conf_t *conf);
+
+/* Implemented in configwriter.c */
 int emit_intercept_config(char *configfile, prov_intercept_conf_t *conf);
 
+/* Implemented in clientupdates.c */
 int announce_default_radius_username(provision_state_t *state,
         default_radius_user_t *raduser);
 int withdraw_default_radius_username(provision_state_t *state,
@@ -309,6 +361,11 @@ int announce_single_intercept(provision_state_t *state,
         void *cept, int (*sendfunc)(net_buffer_t *, void *));
 liid_hash_t *add_liid_mapping(prov_intercept_conf_t *conf,
         char *liid, char *agency);
+
+/* Implemented in hup_reload.c */
+int reload_provisioner_config(provision_state_t *state);
+
+
 #endif
 
 // vim: set sw=4 tabstop=4 softtabstop=4 expandtab :

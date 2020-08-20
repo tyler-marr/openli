@@ -1,3 +1,119 @@
+openli (1.0.6-1) unstable; urgency=medium
+
+  * Added authentication layer to the provisioner REST API. If enabled,
+    REST API requests must either provide a valid API key or use Digest
+    Authentication to confirm that the request has been issued by an
+    authorised party.
+  * Added scripts (openli-prov-authsetup.sh and openli-prov-adduser.sh) to
+    assist in the creation and management of user credentials for the
+    provisioner REST API.
+  * Completely refactored mediator code to be easier to maintain. This
+    in theory should have no impact on end users, but any code refactor
+    may introduce new bugs so we want to make sure users know that we have
+    done this.
+  * Fixed bug where multiple configuration changes to an agency handover
+    would not be applied correctly on the mediator.
+  * Fixed crash when a RADIUS user has been removed but still had an
+    outstanding request for which we then later saw the response.
+
+ -- Shane Alcock <shane.alcock@waikato.ac.nz>  Wed, 5 Aug 2020 16:33:17 +1200
+
+openli (1.0.5-2) unstable; urgency=medium
+
+  * Fix missing dependency on rsyslog
+
+ -- Shane Alcock <shane.alcock@waikato.ac.nz>  Thu, 28 May 2020 10:46:43 +1200
+
+openli (1.0.5-1) unstable; urgency=medium
+
+  * Add config option to disable joining VOIP calls with the same
+    SDP O identifier into the same CIN.
+  * Add HTTPS support to REST API.
+  * Improve IPv6 address handling in RADIUS parser.
+  * Fix erroneous "duplicate intercept" announcements bug.
+  * Add support for RADIUS sessions with both IPv4 and IPv6 addresses.
+  * Fix log spam caused by RADIUS Accounting-On messages.
+  * Fix "bad file descriptor" bug in mediator.
+  * Add ability to intercept multiple RTP streams from the same SIP session.
+  * Fix segfaults when RADIUS messages are missing a Username field.
+  * Fix silent logoff bugs when a RADIUS session has two identifiers.
+  * Fix slow memory leak related to RADIUS session expiry.
+  * Fix collector segfaults when the host runs out of memory.
+  * Fix bug where a reconnecting mediator would not receive buffered records
+    from the collectors.
+  * Fix bug where a mediator could steal records intended for another
+    mediator if it was using the same IP and port for connections.
+  * Fix SSL_write() errors when forwarding records to a mediator.
+  * Fix issues where collectors can end up hanging after being halted.
+  * Fix bug where a provisioner disconnection would cause the collectors
+    to drop all of the mediators, rather than continue forwarding records
+    until the provisioner returned.
+  * Fix minor memory leaks when the provisioner disconnects and reconnects.
+
+ -- Shane Alcock <shane.alcock@waikato.ac.nz>  Fri, 08 May 2020 11:46:29 +1200
+
+openli (1.0.5-1~prerel01) UNRELEASED; urgency=medium
+
+  * Pre-release packaging of 1.0.5 to allow clients to beta-test
+    recent RADIUS parsing fixes.
+  * Add config option to disable joining VOIP calls with the same
+    SDP O identifier into the same CIN.
+  * Add HTTPS support to REST API.
+  * Improve IPv6 address handling in RADIUS parser.
+  * Fix erroneous "duplicate intercept" announcements bug.
+  * Add support for RADIUS sessions with both IPv4 and IPv6 addresses.
+  * Fix log spam caused by RADIUS Accounting-On messages.
+  * Fix "bad file descriptor" bug in mediator.
+  * Add ability to intercept multiple RTP streams from the same SIP session.
+  * Fix segfaults when RADIUS messages are missing a Username field.
+  * Fix silent logoff bugs when a RADIUS session has two identifiers.
+  * Fix slow memory leak related to RADIUS session expiry.
+
+ -- Shane Alcock <shane.alcock@waikato.ac.nz>  Thu, 02 Apr 2020 16:54:21 +1300
+
+openli (1.0.5-1~sdpofix) UNRELEASED; urgency=medium
+
+  * Pre-release packaging of 1.0.5 to allow clients to beta-test
+    the SDP O patch.
+  * Add config option to disable joining VOIP calls with the same
+    SDP O identifier into the same CIN.
+  * Add HTTPS support to REST API.
+
+ -- Shane Alcock <shane.alcock@waikato.ac.nz>  Thu, 13 Feb 2020 13:58:21 +1300
+
+openli (1.0.4-1) unstable; urgency=medium
+
+  * Added REST API to provisioner to allow intercepts, agencies and
+    core servers to be manipulated by sending HTTP requests to a
+    listening socket.
+  * Intercept config has been separated from provisioner config.
+  * Added support for UMTS (mobile) intercepts using GTP.
+  * Allow RADIUS Calling-Station-ID to be used for determining user
+    identity.
+  * Allow multiple concurrent RADIUS sessions for a single user
+    (e.g. simultaneous IPv4 and IPv6 sessions).
+  * Many bug fixes (as documented in
+    https://github.com/wanduow/openli/wiki/ChangeLog).
+
+ -- Shane Alcock <shane.alcock@waikato.ac.nz>  Wed, 18 Dec 2019 10:15:20 +1300
+
+openli (1.0.4-1~gtptest03) UNRELEASED; urgency=medium
+
+  * Pre-release packaging of 1.0.4 for Datora to use for testing the
+    new GTP-based mobile interception capabilities.
+  * Added support for GTPv1.
+
+ -- Shane Alcock <shane.alcock@waikato.ac.nz>  Wed, 18 Dec 2019 10:15:20 +1300
+
+openli (1.0.4-1~gtptest02) UNRELEASED; urgency=medium
+
+  * Pre-release packaging of 1.0.4 for Datora to use for testing the
+    new GTP-based mobile interception capabilities.
+  * Fixed issue where GTP sessions were not properly tracked if the request
+    and response were seen in the wrong order.
+
+ -- Shane Alcock <shane.alcock@waikato.ac.nz>  Mon, 9 Dec 2019 11:00:20 +1300
+
 openli (1.0.4-1~gtptest01) UNRELEASED; urgency=medium
 
   * Pre-release packaging of 1.0.4 for Datora to use for testing the

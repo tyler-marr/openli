@@ -58,6 +58,8 @@ static const char *access_type_to_string(internet_access_method_t method) {
             return "wifi-other";
         case INTERNET_ACCESS_TYPE_MOBILE:
             return "mobile";
+        case INTERNET_ACCESS_TYPE_UNDEFINED:
+            break;
     }
     return "undefined";
 
@@ -410,7 +412,6 @@ static int emit_voipintercepts(voipintercept_t *vints, yaml_emitter_t *emitter)
 {
     yaml_event_t event;
     voipintercept_t *v, *tmp;
-    char buffer[64];
 
     yaml_scalar_event_initialize(&event, NULL, (yaml_char_t *)YAML_STR_TAG,
             (yaml_char_t *)"voipintercepts", strlen("voipintercepts"), 1, 0,
@@ -600,15 +601,23 @@ int emit_intercept_config(char *configfile, prov_intercept_conf_t *conf) {
 
     yaml_emitter_t emitter;
     yaml_event_t event;
-    FILE *f;
+    FILE *f, *fout;
+    char tmpfile[] = "/tmp/openli-intconf-XXXXXX";
+    int tmpfd;
+    char buffer[1024 * 32];
+    size_t n;
 
-    f = fopen(configfile, "w");
+    tmpfd = mkstemp(tmpfile);
+
+    f = fdopen(tmpfd, "w");
     if (ferror(f)) {
-        logger(LOG_INFO, "OpenLI: unable to open config file '%s' to write updated intercept config: %s", configfile, strerror(errno));
+        logger(LOG_INFO, "OpenLI: unable to open config file '%s' to write updated intercept config: %s", tmpfile, strerror(errno));
         return -1;
     }
 
-    /* TODO write warning comments to not edit the file manually */
+    /* TODO write warning comments that manual edits will not persist
+     * unless a HUP is triggered prior to any REST API calls (except
+     * GET) */
 
     yaml_emitter_initialize(&emitter);
     yaml_emitter_set_output_file(&emitter, f);
@@ -620,7 +629,8 @@ int emit_intercept_config(char *configfile, prov_intercept_conf_t *conf) {
     if (!yaml_emitter_emit(&emitter, &event)) goto error;
 
     yaml_mapping_start_event_initialize(&event, NULL,
-            YAML_DEFAULT_MAPPING_TAG, 1, YAML_ANY_MAPPING_STYLE);
+            (unsigned char *)YAML_DEFAULT_MAPPING_TAG, 1,
+            YAML_ANY_MAPPING_STYLE);
     if (!yaml_emitter_emit(&emitter, &event)) goto error;
 
     if (emit_core_server_list(conf->sipservers, "sipservers", &emitter) < 0) {
@@ -666,6 +676,30 @@ int emit_intercept_config(char *configfile, prov_intercept_conf_t *conf) {
     if (f) {
         fclose(f);
     }
+
+    /* copy temp file contents back into the original */
+    f = fopen(tmpfile, "r");
+    fout = fopen(configfile, "w");
+
+    while ((n = fread(buffer, sizeof(char), sizeof(buffer), f)) > 0) {
+        if (fwrite(buffer, sizeof(char), n, fout) != n) {
+            logger(LOG_INFO,
+                    "OpenLI: error writing new intercept config file: %s",
+                    strerror(errno));
+            return -1;
+        }
+    }
+    if (!feof(f)) {
+        logger(LOG_INFO,
+                "OpenLI: error reading temporary intercept config file: %s",
+                strerror(errno));
+        return -1;
+    }
+
+    fclose(fout);
+    fclose(f);
+    unlink(tmpfile);
+
     return 0;
 
 error:

@@ -46,6 +46,8 @@
 #include "netcomms.h"
 #include "util.h"
 #include "ipmmiri.h"
+#include "umtsiri.h"
+#include "ipiri.h"
 
 collector_sync_t *init_sync_data(collector_global_t *glob) {
 
@@ -66,6 +68,7 @@ collector_sync_t *init_sync_data(collector_global_t *glob) {
     sync->instruct_fail = 0;
     sync->instruct_log = 1;
     sync->instruct_events = ZMQ_POLLIN | ZMQ_POLLOUT;
+    sync->hellosreceived = 0;
 
     sync->outgoing = NULL;
     sync->incoming = NULL;
@@ -137,6 +140,8 @@ void clean_sync_data(collector_sync_t *sync) {
 
     HASH_ITER(hh, sync->activeips, iter, tmp) {
         HASH_DELETE(hh, sync->activeips, iter);
+        free(iter->session);
+        free(iter->owner);
         free(iter);
     }
 
@@ -291,25 +296,6 @@ static inline void push_coreserver_msg(collector_sync_t *sync,
     pthread_mutex_unlock(&(sync->glob->mutex));
 }
 
-static inline openli_export_recv_t *_create_ipiri_basic(collector_sync_t *sync,
-        ipintercept_t *ipint, char *username, uint32_t cin) {
-
-    openli_export_recv_t *irimsg;
-
-    irimsg = (openli_export_recv_t *)calloc(1, sizeof(openli_export_recv_t));
-
-    irimsg->type = OPENLI_EXPORT_IPIRI;
-    irimsg->destid = ipint->common.destid;
-    irimsg->data.ipiri.liid = strdup(ipint->common.liid);
-    irimsg->data.ipiri.access_tech = ipint->accesstype;
-    irimsg->data.ipiri.cin = cin;
-    irimsg->data.ipiri.username = strdup(username);
-    irimsg->data.ipiri.iritype = ETSILI_IRI_REPORT;
-    irimsg->data.ipiri.customparams = NULL;
-
-    return irimsg;
-}
-
 void sync_thread_publish_reload(collector_sync_t *sync) {
 
     int i;
@@ -326,191 +312,59 @@ void sync_thread_publish_reload(collector_sync_t *sync) {
     forward_provmsg_to_voipsync(sync, NULL, 0, OPENLI_PROTO_CONFIG_RELOADED);
 }
 
-static int create_ipiri_from_iprange(collector_sync_t *sync,
-        static_ipranges_t *staticsess, ipintercept_t *ipint, uint8_t special) {
-
-    int queueused = 0;
-    struct timeval tv;
-    prefix_t *prefix = NULL;
-    openli_export_recv_t *irimsg;
-
-    prefix = ascii2prefix(0, staticsess->rangestr);
-    if (prefix == NULL) {
-        logger(LOG_INFO,
-                "OpenLI: error converting %s into a valid IP prefix in sync thread",
-                staticsess->rangestr);
-        return -1;
-    }
-
-    irimsg = _create_ipiri_basic(sync, ipint, "unknownuser", staticsess->cin);
-
-    irimsg->data.ipiri.special = special;
-    irimsg->data.ipiri.ipassignmentmethod = OPENLI_IPIRI_IPMETHOD_STATIC;
-
-    /* We generally have no idea when a static session would have started. */
-    irimsg->data.ipiri.sessionstartts.tv_sec = 0;
-    irimsg->data.ipiri.sessionstartts.tv_usec = 0;
-
-    irimsg->data.ipiri.ipfamily = prefix->family;
-    irimsg->data.ipiri.assignedip_prefixbits = prefix->bitlen;
-    if (prefix->family == AF_INET) {
-        struct sockaddr_in *sin;
-
-        sin = (struct sockaddr_in *)&(irimsg->data.ipiri.assignedip);
-        memcpy(&(sin->sin_addr), &(prefix->add.sin), sizeof(struct in_addr));
-        sin->sin_family = AF_INET;
-        sin->sin_port = 0;
-    } else if (prefix->family == AF_INET6) {
-        struct sockaddr_in6 *sin6;
-
-        sin6 = (struct sockaddr_in6 *)&(irimsg->data.ipiri.assignedip);
-        memcpy(&(sin6->sin6_addr), &(prefix->add.sin6),
-                sizeof(struct in6_addr));
-        sin6->sin6_family = AF_INET6;
-        sin6->sin6_port = 0;
-        sin6->sin6_flowinfo = 0;
-        sin6->sin6_scope_id = 0;
-    }
-
-    pthread_mutex_lock(sync->glob->stats_mutex);
-    sync->glob->stats->ipiri_created ++;
-    pthread_mutex_unlock(sync->glob->stats_mutex);
-    publish_openli_msg(sync->zmq_pubsocks[ipint->common.seqtrackerid], irimsg);
-    free(prefix);
-    return 0;
-
-}
-
-static int export_raw_sync_packet_content(collector_sync_t *sync,
-        ipintercept_t *ipint, libtrace_packet_t *pkt, uint32_t seqno,
-        uint32_t cin) {
+static int export_raw_sync_packet_content(access_plugin_t *p,
+        collector_sync_t *sync, ipintercept_t *ipint, void *parseddata,
+        uint32_t seqno, uint32_t cin) {
 
     openli_export_recv_t *msg;
-    void *l3;
-    uint16_t ethertype;
-    uint32_t rem;
+    uint8_t *ipptr = NULL;
+    uint16_t iplen;
 
-    l3 = trace_get_layer3(pkt, &ethertype, &rem);
+    int iteration = 0;
 
-    if (l3 == NULL || rem == 0) {
-        return 0;
-    }
+    do {
+        ipptr = p->get_ip_contents(p, parseddata, &iplen, iteration);
 
-    msg = (openli_export_recv_t *)calloc(1, sizeof(openli_export_recv_t));
-    msg->type = OPENLI_EXPORT_RAW_SYNC;
-    msg->destid = ipint->common.destid;
-    msg->data.rawip.liid = strdup(ipint->common.liid);
-    msg->data.rawip.ipcontent = malloc(rem);
-    msg->data.rawip.seqno = seqno;
-    msg->data.rawip.cin = cin;
+        if (!ipptr) {
+            break;
+        }
 
-    memcpy(msg->data.rawip.ipcontent, l3, rem);
-    msg->data.rawip.ipclen = rem;
-    publish_openli_msg(sync->zmq_pubsocks[ipint->common.seqtrackerid], msg);
-    return 1;
+        msg = (openli_export_recv_t *)calloc(1, sizeof(openli_export_recv_t));
+        msg->type = OPENLI_EXPORT_RAW_SYNC;
+        msg->destid = ipint->common.destid;
+        msg->data.rawip.liid = strdup(ipint->common.liid);
+
+        msg->data.rawip.ipcontent = ipptr;
+        msg->data.rawip.ipclen = iplen;
+        msg->data.rawip.seqno = seqno;
+        msg->data.rawip.cin = cin;
+        iteration ++;
+
+        publish_openli_msg(sync->zmq_pubsocks[ipint->common.seqtrackerid], msg);
+    } while (ipptr);
+
+    return iteration;
 }
 
-static int create_mobiri_from_session(collector_sync_t *sync,
+static int create_iri_from_packet_event(collector_sync_t *sync,
         access_session_t *sess, ipintercept_t *ipint, access_plugin_t *p,
         void *parseddata) {
 
-    openli_export_recv_t *irimsg;
-    int ret;
-
-    irimsg = (openli_export_recv_t *)calloc(1, sizeof(openli_export_recv_t));
-    irimsg->type = OPENLI_EXPORT_UMTSIRI;
-    irimsg->destid = ipint->common.destid;
-    irimsg->data.mobiri.liid = strdup(ipint->common.liid);
-    irimsg->data.mobiri.cin = sess->cin;
-    irimsg->data.mobiri.iritype = ETSILI_IRI_NONE;
-    irimsg->data.mobiri.customparams = NULL;
-
-    if (p) {
-        ret = p->generate_iri_data(p, parseddata,
-                &(irimsg->data.mobiri.customparams),
-                &(irimsg->data.mobiri.iritype),
-                sync->freegenerics, 0);
-        if (ret == -1) {
-            logger(LOG_INFO,
-                    "OpenLI: error whle creating UMTSIRI from session state change for %s.",
-                    irimsg->data.mobiri.liid);
-            free(irimsg->data.mobiri.liid);
-            free(irimsg);
-            return -1;
-        }
+    if (ipint->accesstype == INTERNET_ACCESS_TYPE_MOBILE) {
+        return create_mobiri_job_from_packet(sync, sess, ipint, p, parseddata);
     }
 
-    if (irimsg->data.mobiri.iritype == ETSILI_IRI_NONE) {
-            free(irimsg->data.mobiri.liid);
-            free(irimsg);
-            return 0;
-    }
-
-    pthread_mutex_lock(sync->glob->stats_mutex);
-    sync->glob->stats->mobiri_created ++;
-    pthread_mutex_unlock(sync->glob->stats_mutex);
-    publish_openli_msg(sync->zmq_pubsocks[ipint->common.seqtrackerid], irimsg);
-
-    return 1;
+    return create_ipiri_job_from_packet(sync, sess, ipint, p, parseddata);
 }
 
-static int create_ipiri_from_session(collector_sync_t *sync,
-        access_session_t *sess, ipintercept_t *ipint, access_plugin_t *p,
-        void *parseddata, uint8_t special) {
+static int create_iri_from_session(collector_sync_t *sync,
+        access_session_t *sess, ipintercept_t *ipint, uint8_t special) {
 
-    openli_export_recv_t *irimsg;
-    int ret, iter = 0;
+    if (ipint->accesstype == INTERNET_ACCESS_TYPE_MOBILE) {
+        return create_mobiri_job_from_session(sync, sess, ipint, special);
+    }
 
-    ret = 0;
-    do {
-        irimsg = _create_ipiri_basic(sync, ipint, ipint->username, sess->cin);
-
-        irimsg->data.ipiri.special = special;
-        irimsg->data.ipiri.customparams = NULL;
-
-        if (p) {
-            ret = p->generate_iri_data(p, parseddata,
-                    &(irimsg->data.ipiri.customparams),
-                    &(irimsg->data.ipiri.iritype),
-                    sync->freegenerics, iter);
-
-            if (ret == -1) {
-                logger(LOG_INFO,
-                        "OpenLI: error while creating IPIRI from session state change for %s.",
-                        irimsg->data.ipiri.liid);
-                free(irimsg->data.ipiri.username);
-                free(irimsg->data.ipiri.liid);
-                free(irimsg);
-                return -1;
-            }
-        }
-
-        irimsg->data.ipiri.ipassignmentmethod = OPENLI_IPIRI_IPMETHOD_UNKNOWN;
-        irimsg->data.ipiri.assignedip_prefixbits = sess->sessionip.prefixbits;
-
-        if (sess->sessionip.ipfamily) {
-            irimsg->data.ipiri.sessionstartts = sess->started;
-            irimsg->data.ipiri.ipfamily = sess->sessionip.ipfamily;
-            memcpy(&(irimsg->data.ipiri.assignedip),
-                    &(sess->sessionip.assignedip),
-                    (sess->sessionip.ipfamily == AF_INET) ?
-                    sizeof(struct sockaddr_in) :
-                    sizeof(struct sockaddr_in6));
-        } else {
-            irimsg->data.ipiri.ipfamily = 0;
-            irimsg->data.ipiri.sessionstartts.tv_sec = 0;
-            irimsg->data.ipiri.sessionstartts.tv_usec = 0;
-            memset(&(irimsg->data.ipiri.assignedip), 0,
-                    sizeof(struct sockaddr_storage));
-        }
-
-        pthread_mutex_lock(sync->glob->stats_mutex);
-        sync->glob->stats->ipiri_created ++;
-        pthread_mutex_unlock(sync->glob->stats_mutex);
-        publish_openli_msg(sync->zmq_pubsocks[ipint->common.seqtrackerid], irimsg);
-        iter ++;
-    } while (ret > 0);
-    return 0;
+    return create_ipiri_job_from_session(sync, sess, ipint, special);
 
 }
 
@@ -580,25 +434,26 @@ static inline void push_single_ipintercept(collector_sync_t *sync,
 
     ipsession_t *ipsess;
     openli_pushed_t msg;
+    int i;
 
-    /* No assigned IP, session is not fully active yet. Don't push yet */
-    if (session->sessionip.ipfamily == 0) {
-        return;
+    for (i = 0; i < session->sessipcount; i++) {
+
+        ipsess = create_ipsession(ipint, session->cin,
+            session->sessionips[i].ipfamily,
+            (struct sockaddr *)&(session->sessionips[i].assignedip),
+            session->sessionips[i].prefixbits);
+
+        if (!ipsess) {
+            logger(LOG_INFO,
+                    "OpenLI: ran out of memory while creating IP session message.");
+            return;
+        }
+        memset(&msg, 0, sizeof(openli_pushed_t));
+        msg.type = OPENLI_PUSH_IPINTERCEPT;
+        msg.data.ipsess = ipsess;
+
+        libtrace_message_queue_put(q, (void *)(&msg));
     }
-
-    ipsess = create_ipsession(ipint, session->cin, session->sessionip.ipfamily,
-            (struct sockaddr *)&(session->sessionip.assignedip));
-
-    if (!ipsess) {
-        logger(LOG_INFO,
-                "OpenLI: ran out of memory while creating IP session message.");
-        return;
-    }
-    memset(&msg, 0, sizeof(openli_pushed_t));
-    msg.type = OPENLI_PUSH_IPINTERCEPT;
-    msg.data.ipsess = ipsess;
-
-    libtrace_message_queue_put(q, (void *)(&msg));
 }
 
 static inline void push_single_vendmirrorid(libtrace_message_queue_t *q,
@@ -618,7 +473,6 @@ static inline void push_single_vendmirrorid(libtrace_message_queue_t *q,
         return;
     }
 
-    jm->cin = 0;
     memset(&msg, 0, sizeof(openli_pushed_t));
     msg.type = msgtype;
     msg.data.mirror = jm;
@@ -717,7 +571,7 @@ static int new_staticiprange(collector_sync_t *sync, uint8_t *intmsg,
     HASH_ADD_KEYPTR(hh, ipint->statics, ipr->rangestr,
             strlen(ipr->rangestr), ipr);
 
-    create_ipiri_from_iprange(sync, ipr, ipint, OPENLI_IPIRI_STARTWHILEACTIVE);
+    create_ipiri_job_from_iprange(sync, ipr, ipint, OPENLI_IPIRI_STARTWHILEACTIVE);
 
     HASH_ITER(hh, (sync_sendq_t *)(sync->glob->collector_queues),
             sendq, tmp) {
@@ -781,7 +635,7 @@ static int remove_staticiprange(collector_sync_t *sync, static_ipranges_t *ipr)
 
     HASH_FIND(hh, ipint->statics, ipr->rangestr, strlen(ipr->rangestr), found);
     if (found) {
-        create_ipiri_from_iprange(sync, found, ipint,
+        create_ipiri_job_from_iprange(sync, found, ipint,
                 OPENLI_IPIRI_ENDWHILEACTIVE);
         HASH_ITER(hh, (sync_sendq_t *)(sync->glob->collector_queues),
                 sendq, tmp) {
@@ -811,23 +665,23 @@ static inline void push_session_halt_to_threads(void *sendqs,
         access_session_t *sess, ipintercept_t *ipint) {
 
     sync_sendq_t *sendq, *tmp;
+    int i;
 
-    if (sess->sessionip.ipfamily == 0) {
-        return;
-    }
-
-    HASH_ITER(hh, (sync_sendq_t *)sendqs, sendq, tmp) {
+    for (i = 0; i < sess->sessipcount; i++) {
         openli_pushed_t pmsg;
         ipsession_t *sessdup;
 
-        memset(&pmsg, 0, sizeof(openli_pushed_t));
-        pmsg.type = OPENLI_PUSH_HALT_IPINTERCEPT;
-        sessdup = create_ipsession(ipint, sess->cin, sess->sessionip.ipfamily,
-                (struct sockaddr *)&(sess->sessionip.assignedip));
+        HASH_ITER(hh, (sync_sendq_t *)sendqs, sendq, tmp) {
+            memset(&pmsg, 0, sizeof(openli_pushed_t));
+            pmsg.type = OPENLI_PUSH_HALT_IPINTERCEPT;
+            sessdup = create_ipsession(ipint, sess->cin,
+                    sess->sessionips[i].ipfamily,
+                    (struct sockaddr *)&(sess->sessionips[i].assignedip),
+                    sess->sessionips[i].prefixbits);
 
-        pmsg.data.ipsess = sessdup;
-
-        libtrace_message_queue_put(sendq->q, &pmsg);
+            pmsg.data.ipsess = sessdup;
+            libtrace_message_queue_put(sendq->q, &pmsg);
+        }
 
     }
 }
@@ -835,7 +689,6 @@ static inline void push_session_halt_to_threads(void *sendqs,
 static inline void push_ipintercept_halt_to_threads(collector_sync_t *sync,
         ipintercept_t *ipint) {
 
-    sync_sendq_t *sendq, *tmp;
     internet_user_t *user;
     access_session_t *sess, *tmp2;
     static_ipranges_t *ipr, *tmpr;
@@ -858,8 +711,7 @@ static inline void push_ipintercept_halt_to_threads(collector_sync_t *sync,
     HASH_ITER(hh, user->sessions, sess, tmp2) {
         /* TODO skip sessions that were never active */
 
-        create_ipiri_from_session(sync, sess, ipint, NULL, NULL,
-                OPENLI_IPIRI_ENDWHILEACTIVE);
+        create_iri_from_session(sync, sess, ipint, OPENLI_IPIRI_ENDWHILEACTIVE);
         push_session_halt_to_threads(sync->glob->collector_queues, sess,
                 ipint);
     }
@@ -1037,14 +889,15 @@ static void push_existing_user_sessions(collector_sync_t *sync,
 
     if (user) {
         access_session_t *sess, *tmp2;
+
         HASH_ITER(hh, user->sessions, sess, tmp2) {
             HASH_ITER(hh, (sync_sendq_t *)(sync->glob->collector_queues),
                     sendq, tmp) {
                 push_single_ipintercept(sync, sendq->q, cept, sess);
             }
 
-            /* TODO we'll also need to trigger an Intercept started while
-             * active BEGIN IRI */
+            create_iri_from_session(sync, sess, cept,
+                    OPENLI_IPIRI_STARTWHILEACTIVE);
         }
     }
 
@@ -1054,11 +907,6 @@ static int insert_new_ipintercept(collector_sync_t *sync, ipintercept_t *cept) {
 
     openli_export_recv_t *expmsg;
     int i;
-
-    if (cept->username) {
-        push_existing_user_sessions(sync, cept);
-        add_intercept_to_user_intercept_list(&sync->userintercepts, cept);
-    }
 
     if (cept->vendmirrorid != OPENLI_VENDOR_MIRROR_NONE) {
 
@@ -1098,6 +946,11 @@ static int insert_new_ipintercept(collector_sync_t *sync, ipintercept_t *cept) {
     for (i = 0; i < sync->forwardcount; i++) {
         expmsg = create_intercept_details_msg(&(cept->common));
         publish_openli_msg(sync->zmq_fwdctrlsocks[i], expmsg);
+    }
+
+    if (cept->username) {
+        push_existing_user_sessions(sync, cept);
+        add_intercept_to_user_intercept_list(&sync->userintercepts, cept);
     }
 
     return 1;
@@ -1202,13 +1055,13 @@ static int modify_ipintercept(collector_sync_t *sync, uint8_t *intmsg,
         }
     }
 
+    return 0;
 }
 
 static int halt_ipintercept(collector_sync_t *sync, uint8_t *intmsg,
         uint16_t msglen) {
 
     ipintercept_t *ipint, torem;
-    int i;
 
     if (decode_ipintercept_halt(intmsg, msglen, &torem) == -1) {
         if (sync->instruct_log) {
@@ -1228,6 +1081,18 @@ static int halt_ipintercept(collector_sync_t *sync, uint8_t *intmsg,
     }
 
     remove_ip_intercept(sync, ipint);
+    if (torem.common.liid) {
+        free(torem.common.liid);
+    }
+
+    if (torem.common.authcc) {
+        free(torem.common.authcc);
+    }
+
+    if (torem.common.delivcc) {
+        free(torem.common.delivcc);
+    }
+
 
     return 1;
 }
@@ -1341,7 +1206,6 @@ static int new_ipintercept(collector_sync_t *sync, uint8_t *intmsg,
         uint16_t msglen) {
 
     ipintercept_t *cept, *x;
-    int i;
 
     cept = (ipintercept_t *)malloc(sizeof(ipintercept_t));
     if (decode_ipintercept_start(intmsg, msglen, cept) == -1) {
@@ -1389,7 +1253,7 @@ static int new_ipintercept(collector_sync_t *sync, uint8_t *intmsg,
                 x->accesstype = cept->accesstype;
             }
             x->awaitingconfirm = 0;
-            free(cept);
+            free_single_ipintercept(cept);
             /* our collector threads should already know about this intercept */
             return 1;
         }
@@ -1444,10 +1308,8 @@ static int new_voipintercept(collector_sync_t *sync, uint8_t *intmsg,
 }
 
 static void disable_unconfirmed_intercepts(collector_sync_t *sync) {
-    voipintercept_t *v, *tmp2;
     coreserver_t *cs, *tmp3;
     ipintercept_t *ipint, *tmp;
-    internet_user_t *user;
     static_ipranges_t *ipr, *tmpr;
     default_radius_user_t *defrad, *tmprad;
 
@@ -1681,6 +1543,9 @@ int sync_connect_provisioner(collector_sync_t *sync, SSL_CTX *ctx) {
         fd_set_block(sockfd);
         //collector cannt do anything untill it has instructions from provisioner so blocking is fine
 
+        if (sync->ssl) {
+            SSL_free(sync->ssl);
+        }
         sync->ssl = SSL_new(ctx);
         SSL_set_fd(sync->ssl, sockfd);
         SSL_set_connect_state(sync->ssl); //set client mode
@@ -1836,59 +1701,148 @@ static int remove_ip_to_session_mapping(collector_sync_t *sync,
 
     ip_to_session_t *mapping;
     char ipstr[128];
+    int i, j, errs = 0, nullsess = 0;
 
-    if (sess->sessionip.ipfamily == 0) {
+    for (i = 0; i < sess->sessipcount; i++) {
+        nullsess = 0;
+
+        if (sess->sessionips[i].ipfamily == 0) {
+            continue;
+        }
+
+        HASH_FIND(hh, sync->activeips, &(sess->sessionips[i]),
+                sizeof(internetaccess_ip_t), mapping);
+
+        if (!mapping) {
+            logger(LOG_INFO,
+                "OpenLI: attempt to remove session mapping for IP %s, but the mapping doesn't exist?",
+                sockaddr_to_string(
+                    (struct sockaddr *)&(sess->sessionips[i].assignedip),
+                    ipstr, 128));
+            errs ++;
+            continue;
+        }
+
+        for (j = 0; j < mapping->sessioncount; j++) {
+            if (mapping->session[j] == NULL) {
+                nullsess ++;
+                continue;
+            }
+
+            /* should be ok to compare pointers, right? */
+            if (mapping->session[j] == sess) {
+                mapping->session[j] = NULL;
+                mapping->owner[j] = NULL;
+                nullsess ++;
+            }
+        }
+
+        if (nullsess == mapping->sessioncount) {
+            /* all sessions relating to this IP have been removed, so we
+             * can free the mapping object */
+            HASH_DELETE(hh, sync->activeips, mapping);
+            free(mapping->session);
+            free(mapping->owner);
+            free(mapping);
+        }
+    }
+    if (errs == 0) {
         return 0;
     }
+    return -1;
+}
 
-    HASH_FIND(hh, sync->activeips, &(sess->sessionip),
-            sizeof(internetaccess_ip_t), mapping);
+static inline int report_silent_logoffs(collector_sync_t *sync,
+        ip_to_session_t *prev) {
 
-    if (!mapping) {
-        logger(LOG_INFO,
-            "OpenLI: attempt to remove session mapping for IP %s, but the mapping doesn't exist?",
-            sockaddr_to_string((struct sockaddr *)&(sess->sessionip.assignedip),
-                ipstr, 128));
-        return -1;
+    user_intercept_list_t *prevuser;
+    ipintercept_t *ipint, *tmp;
+    int i;
+    char ipstr[128];
+
+    for (i = 0; i < prev->sessioncount; i++) {
+
+        /* Check for silent-logoff scenario */
+        if (prev->owner[i] == NULL || prev->session[i] == NULL) {
+            continue;
+        }
+        HASH_FIND(hh, sync->userintercepts, prev->owner[i]->userid,
+                strlen(prev->owner[i]->userid), prevuser);
+        if (prevuser) {
+
+            logger(LOG_INFO,
+                    "OpenLI: detected silent owner change for IP %s",
+                    sockaddr_to_string(
+                        (struct sockaddr *)&(prev->ip.assignedip),
+                        ipstr, 128));
+            HASH_ITER(hh_user, prevuser->intlist, ipint, tmp) {
+                create_iri_from_session(sync,
+                        prev->session[i],
+                        ipint, OPENLI_IPIRI_SILENTLOGOFF);
+                push_session_halt_to_threads(sync->glob->collector_queues,
+                        prev->session[i], ipint);
+            }
+        }
+
+        if (remove_session_ip(prev->session[i], &(prev->ip)) == 1) {
+            free_single_session(prev->owner[i], prev->session[i]);
+        }
     }
-
-    HASH_DELETE(hh, sync->activeips, mapping);
-    free(mapping);
-    return 0;
+    HASH_DELETE(hh, sync->activeips, prev);
+    free(prev->session);
+    free(prev->owner);
+    free(prev);
+    return 1;
 }
 
 static int add_ip_to_session_mapping(collector_sync_t *sync,
-        access_session_t *sess, internet_user_t *iuser,
-        ip_to_session_t **prev) {
+        access_session_t *sess, internet_user_t *iuser) {
 
+    int i, replaced = 0;
+    ip_to_session_t *prev;
     char ipstr[128];
 
-    *prev = NULL;
+    prev = NULL;
     ip_to_session_t *newmap;
 
-    if (sess->sessionip.ipfamily == 0) {
+    if (sess->sessipcount == 0) {
         logger(LOG_INFO, "OpenLI: called add_ip_to_session_mapping() but no IP has been assigned for this session.");
         return -1;
     }
 
-    HASH_FIND(hh, sync->activeips, &(sess->sessionip),
-            sizeof(internetaccess_ip_t), *prev);
+    for (i = 0; i < sess->sessipcount; i++) {
+        HASH_FIND(hh, sync->activeips, &(sess->sessionips[i]),
+                sizeof(internetaccess_ip_t), prev);
 
-    newmap = (ip_to_session_t *)malloc(sizeof(ip_to_session_t));
-    newmap->ip = &(sess->sessionip);
-    newmap->session = sess;
-    newmap->owner = iuser;
+        if (prev && prev->cin == sess->cin) {
+            prev->session = realloc(prev->session,
+                    (prev->sessioncount + 1) * sizeof(access_session_t *));
+            prev->owner = realloc(prev->owner,
+                    (prev->sessioncount + 1) * sizeof(internet_user_t *));
+            prev->session[prev->sessioncount] = sess;
+            prev->owner[prev->sessioncount] = iuser;
+            prev->sessioncount ++;
+            continue;
+        } else if (prev) {
+            replaced += report_silent_logoffs(sync, prev);
+            /* fall through to replace prev with a new entry */
+        }
 
-    if (*prev) {
-        HASH_DELETE(hh, sync->activeips, *prev);
+        newmap = (ip_to_session_t *)malloc(sizeof(ip_to_session_t));
+        newmap->ip = sess->sessionips[i];
+        newmap->sessioncount = 1;
+        newmap->session = calloc(1, sizeof(access_session_t *));
+        newmap->owner = calloc(1, sizeof(internet_user_t *));
+        newmap->cin = sess->cin;
+
+        newmap->session[0] = sess;
+        newmap->owner[0] = iuser;
+
+        HASH_ADD_KEYPTR(hh, sync->activeips, &newmap->ip,
+                sizeof(internetaccess_ip_t), newmap);
+
     }
-    HASH_ADD_KEYPTR(hh, sync->activeips, newmap->ip,
-            sizeof(internetaccess_ip_t), newmap);
-
-    if (*prev) {
-        return 1;
-    }
-    return 0;
+    return replaced;
 }
 
 static inline internet_user_t *lookup_userid(collector_sync_t *sync,
@@ -1919,14 +1873,11 @@ static int newly_active_session(collector_sync_t *sync,
         access_session_t *sess) {
 
     int mapret = 0;
-    ip_to_session_t *prevmapping = NULL;
-    user_intercept_list_t *prevuser;
-    ipintercept_t *ipint, *tmp;
-    int expcount = 0;
     sync_sendq_t *sendq, *tmpq;
+    ipintercept_t *ipint, *tmp;
 
-    if (sess->sessionip.ipfamily != 0) {
-        mapret = add_ip_to_session_mapping(sync, sess, iuser, &prevmapping);
+    if (sess->sessipcount > 0) {
+        mapret = add_ip_to_session_mapping(sync, sess, iuser);
         if (mapret < 0) {
             logger(LOG_INFO,
                 "OpenLI: error while updating IP->session map in sync thread.");
@@ -1934,36 +1885,8 @@ static int newly_active_session(collector_sync_t *sync,
         }
     }
 
-    if (mapret == 1) {
-        /* This new session has the same IP as an existing one, so
-         * the existing one must have silently logged off.
-         *
-         * TODO test this somehow?
-         */
-        HASH_FIND(hh, sync->userintercepts, prevmapping->owner->userid,
-                strlen(prevmapping->owner->userid), prevuser);
-        if (prevuser) {
-            char ipstr[128];
-            logger(LOG_INFO,
-                    "OpenLI: detected silent owner change for IP %s",
-                    sockaddr_to_string(
-                        (struct sockaddr *)&(prevmapping->ip->assignedip),
-                        ipstr, 128));
-
-            HASH_ITER(hh_user, prevuser->intlist, ipint, tmp) {
-                int queueused = 0;
-                queueused = create_ipiri_from_session(sync,
-                        prevmapping->session,
-                        ipint, NULL, NULL, OPENLI_IPIRI_SILENTLOGOFF);
-                expcount ++;
-            }
-        }
-        free_single_session(prevmapping->owner, prevmapping->session);
-    }
-
-
     if (!userint) {
-        return expcount;
+        return 0;
     }
 
     /* Session has been confirmed for a target; time to start intercepting
@@ -1979,7 +1902,7 @@ static int newly_active_session(collector_sync_t *sync,
     sync->glob->stats->ipsessions_added_diff ++;
     sync->glob->stats->ipsessions_added_total ++;
     pthread_mutex_unlock(sync->glob->stats_mutex);
-    return expcount;
+    return 0;
 
 
 }
@@ -2029,7 +1952,6 @@ static int update_user_sessions(collector_sync_t *sync, libtrace_packet_t *pkt,
 
     access_plugin_t *p = NULL;
     user_identity_t *identities = NULL;
-    char *userid;
     internet_user_t *iuser;
     access_session_t *sess;
     access_action_t accessaction;
@@ -2134,17 +2056,13 @@ static int update_user_sessions(collector_sync_t *sync, libtrace_packet_t *pkt,
                     uint32_t seqno;
 
                     seqno = p->get_packet_sequence(p, parseddata);
-                    export_raw_sync_packet_content(sync, ipint, pkt, seqno,
-                            sess->cin);
-                    expcount ++;
-                } else if (accessaction != ACCESS_ACTION_NONE) {
-                    if (ipint->accesstype != INTERNET_ACCESS_TYPE_MOBILE) {
-                        create_ipiri_from_session(sync, sess, ipint, p,
-                                parseddata, OPENLI_IPIRI_STANDARD);
-                    } else {
-                        create_mobiri_from_session(sync, sess, ipint, p,
-                                parseddata);
+                    if (export_raw_sync_packet_content(p, sync, ipint,
+                            parseddata, seqno, sess->cin) > 0) {
+                        expcount ++;
                     }
+                } else if (accessaction != ACCESS_ACTION_NONE) {
+                    create_iri_from_packet_event(sync, sess, ipint, p,
+                            parseddata);
                     expcount ++;
                 }
             }
@@ -2203,7 +2121,20 @@ int sync_thread_main(collector_sync_t *sync) {
         }
     }
 
-    if (items[1].revents & ZMQ_POLLIN) {
+    /* Don't process any incoming messages from the provisioner until
+     * all of our processing threads have started up. This helps avoid
+     * concurrency issues where we end up doing duplicate announcements
+     * of "active" intercepts because we announce them both as soon as
+     * we get the message from the provisioner and then again when the
+     * HELLO message comes in from the processing threads.
+     *
+     * NOTE: we should consider just removing HELLO messages entirely,
+     * as they communicate no useful information and we should be able
+     * to push messages onto the queue for a processing thread, even if
+     * the thread itself is still in the process of starting up.
+     */
+    if ((items[1].revents & ZMQ_POLLIN) &&
+            sync->hellosreceived >= sync->glob->total_col_threads) {
         if (recv_from_provisioner(sync) <= 0) {
             sync_disconnect_provisioner(sync, 0);
             return 0;
@@ -2227,6 +2158,11 @@ int sync_thread_main(collector_sync_t *sync) {
                 push_all_active_intercepts(sync, sync->allusers,
                         sync->ipintercepts, recvd.data.replyq);
                 push_all_coreservers(sync->coreservers, recvd.data.replyq);
+                sync->hellosreceived ++;
+
+                if (sync->hellosreceived == sync->glob->total_col_threads) {
+                    logger(LOG_INFO, "openli-collector: all processing threads have reported for duty");
+                }
             }
 
 

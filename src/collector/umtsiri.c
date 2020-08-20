@@ -69,4 +69,132 @@ int encode_umtsiri(wandder_encoder_t *encoder,
     return 0;
 }
 
+#ifdef HAVE_BER_ENCODING
+int encode_umtsiri_ber(
+        openli_mobiri_job_t *job,
+        etsili_generic_freelist_t *freegenerics,
+        uint32_t seqno,
+        openli_encoded_result_t *res,
+        wandder_etsili_child_t *child) {
+
+    struct timeval current_tv;
+
+    uint32_t liidlen = (uint32_t)((size_t)child->owner->preencoded[WANDDER_PREENCODE_LIID_LEN]);
+
+    gettimeofday(&current_tv, NULL);
+    memset(res, 0, sizeof(openli_encoded_result_t));    
+
+    wandder_encode_etsi_umtsiri_ber(   //new way
+        (int64_t)job->cin,
+        (int64_t)seqno,
+        &current_tv, 
+        job->customparams, 
+        job->iritype, 
+        child);
+
+    res->msgbody = malloc(sizeof(wandder_encoded_result_t));
+    res->msgbody->encoder = NULL;
+    res->msgbody->encoded = child->buf;
+    res->msgbody->len = child->len;
+    res->msgbody->alloced = child->alloc_len;
+    res->msgbody->next = NULL;
+
+    res->ipcontents = NULL;
+    res->ipclen = 0;
+
+    res->header.magic = htonl(OPENLI_PROTO_MAGIC);
+    res->header.bodylen = htons(res->msgbody->len + liidlen + sizeof(uint16_t));
+    res->header.intercepttype = htons(OPENLI_PROTO_ETSI_IRI);
+    res->header.internalid = 0;
+
+    free_umtsiri_parameters(job->customparams);
+    return 0;
+}
+#endif
+
+int create_mobiri_job_from_session(collector_sync_t *sync,
+        access_session_t *sess, ipintercept_t *ipint, uint8_t special) {
+
+    openli_export_recv_t *irimsg;
+    int ret;
+
+    irimsg = (openli_export_recv_t *)calloc(1, sizeof(openli_export_recv_t));
+    irimsg->type = OPENLI_EXPORT_UMTSIRI;
+    irimsg->destid = ipint->common.destid;
+    irimsg->data.mobiri.liid = strdup(ipint->common.liid);
+    irimsg->data.mobiri.cin = sess->cin;
+    irimsg->data.mobiri.iritype = ETSILI_IRI_NONE;
+    irimsg->data.mobiri.customparams = NULL;
+
+    ret = sess->plugin->generate_iri_from_session(sess->plugin, sess,
+            &(irimsg->data.mobiri.customparams),
+            &(irimsg->data.mobiri.iritype), sync->freegenerics, special);
+    if (ret == -1) {
+        logger(LOG_INFO,
+                "OpenLI: error whle creating UMTSIRI from existing session %s.",
+                irimsg->data.mobiri.liid);
+        free(irimsg->data.mobiri.liid);
+        free(irimsg);
+        return -1;
+    }
+
+    if (irimsg->data.mobiri.iritype == ETSILI_IRI_NONE) {
+            free(irimsg->data.mobiri.liid);
+            free(irimsg);
+            return 0;
+    }
+
+    pthread_mutex_lock(sync->glob->stats_mutex);
+    sync->glob->stats->mobiri_created ++;
+    pthread_mutex_unlock(sync->glob->stats_mutex);
+    publish_openli_msg(sync->zmq_pubsocks[ipint->common.seqtrackerid], irimsg);
+
+    return 1;
+}
+
+int create_mobiri_job_from_packet(collector_sync_t *sync,
+        access_session_t *sess, ipintercept_t *ipint, access_plugin_t *p,
+        void *parseddata) {
+
+    openli_export_recv_t *irimsg;
+    int ret;
+
+    irimsg = (openli_export_recv_t *)calloc(1, sizeof(openli_export_recv_t));
+    irimsg->type = OPENLI_EXPORT_UMTSIRI;
+    irimsg->destid = ipint->common.destid;
+    irimsg->data.mobiri.liid = strdup(ipint->common.liid);
+    irimsg->data.mobiri.cin = sess->cin;
+    irimsg->data.mobiri.iritype = ETSILI_IRI_NONE;
+    irimsg->data.mobiri.customparams = NULL;
+
+    if (p) {
+        ret = p->generate_iri_data(p, parseddata,
+                &(irimsg->data.mobiri.customparams),
+                &(irimsg->data.mobiri.iritype),
+                sync->freegenerics, 0);
+        if (ret == -1) {
+            logger(LOG_INFO,
+                    "OpenLI: error whle creating UMTSIRI from session state change for %s.",
+                    irimsg->data.mobiri.liid);
+            free(irimsg->data.mobiri.liid);
+            free(irimsg);
+            return -1;
+        }
+    }
+
+    if (irimsg->data.mobiri.iritype == ETSILI_IRI_NONE) {
+            free(irimsg->data.mobiri.liid);
+            free(irimsg);
+            return 0;
+    }
+
+    pthread_mutex_lock(sync->glob->stats_mutex);
+    sync->glob->stats->mobiri_created ++;
+    pthread_mutex_unlock(sync->glob->stats_mutex);
+    publish_openli_msg(sync->zmq_pubsocks[ipint->common.seqtrackerid], irimsg);
+
+    return 1;
+}
+
+
 // vim: set sw=4 tabstop=4 softtabstop=4 expandtab :

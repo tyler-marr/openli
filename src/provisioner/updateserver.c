@@ -33,6 +33,11 @@
 #include <microhttpd.h>
 #include <json-c/json.h>
 #include <pthread.h>
+#include <assert.h>
+
+#ifdef HAVE_SQLCIPHER
+#include <sqlcipher/sqlite3.h>
+#endif
 
 #include "provisioner.h"
 #include "logger.h"
@@ -42,6 +47,63 @@
 #define MICRO_POST 0
 #define MICRO_GET 1
 #define MICRO_DELETE 2
+
+#define OPAQUE_TOKEN "a7844291bd990a17bfe389e1ccb0981ed6d187a"
+
+int init_restauth_db(provision_state_t *state) {
+#ifdef HAVE_SQLCIPHER
+    int rc;
+
+    assert(state != NULL);
+
+    if (state->authdb) {
+        sqlite3_close(state->authdb);
+    }
+
+    rc = sqlite3_open(state->restauthdbfile, (sqlite3 **)(&(state->authdb)));
+    if (rc != SQLITE_OK) {
+        logger(LOG_INFO, "OpenLI provisioner: Failed to open REST authentication database: %s: %s",
+                state->restauthdbfile, sqlite3_errmsg(state->authdb));
+        sqlite3_close(state->authdb);
+        state->authdb = NULL;
+        return -1;
+    }
+
+    sqlite3_key(state->authdb, state->restauthkey, strlen(state->restauthkey));
+
+    if (sqlite3_exec(state->authdb, "SELECT count(*) from sqlite_master;",
+            NULL, NULL, NULL) != SQLITE_OK) {
+        logger(LOG_INFO, "OpenLI provisioner: Failed to open REST authentication database due to incorrect key");
+        sqlite3_close(state->authdb);
+        state->authdb = NULL;
+        return -1;
+    }
+
+    logger(LOG_INFO, "OpenLI provisioner: Authentication enabled for the REST API (using DB %s)",
+            state->restauthdbfile);
+    state->restauthenabled = 1;
+	return 1;
+#else
+	state->restauthenabled = 0;
+    return 0;
+#endif
+}
+
+static int send_auth_failure(struct MHD_Connection *connection,
+        const char *realm, int cause) {
+    int ret;
+    struct MHD_Response *resp;
+
+    resp = MHD_create_response_from_buffer(strlen(auth_failed),
+            (void *)auth_failed, MHD_RESPMEM_MUST_COPY);
+    if (!resp) {
+        return MHD_NO;
+    }
+    ret = MHD_queue_auth_fail_response(connection, realm, OPAQUE_TOKEN, resp,
+            (cause == MHD_INVALID_NONCE) ? MHD_YES : MHD_NO);
+    MHD_destroy_response(resp);
+    return ret;
+}
 
 static int send_http_page(struct MHD_Connection *connection, const char *page,
         int status_code) {
@@ -60,36 +122,66 @@ static int send_http_page(struct MHD_Connection *connection, const char *page,
     return ret;
 }
 
-static int update_configuration_delete(update_con_info_t *cinfo,
-        provision_state_t *state, const char *url) {
+static int send_json_object(struct MHD_Connection *connection,
+        json_object *jobj) {
 
-    int ret = 0;
-    char *urlcopy = strdup(url);
+    int ret;
+    struct MHD_Response *resp;
+    const char *jsonstr;
+
+    if (jobj) {
+        jsonstr = json_object_to_json_string(jobj);
+        if (!jsonstr) {
+            return MHD_NO;
+        }
+
+        resp = MHD_create_response_from_buffer(strlen(jsonstr), (void *)jsonstr,
+                MHD_RESPMEM_MUST_COPY);
+        if (!resp) {
+            return MHD_NO;
+        }
+
+        MHD_add_response_header(resp, MHD_HTTP_HEADER_CONTENT_TYPE,
+                "application/json");
+        ret = MHD_queue_response(connection, MHD_HTTP_OK, resp);
+    } else {
+
+        resp = MHD_create_response_from_buffer(strlen(get404), (void *)get404,
+                MHD_RESPMEM_MUST_COPY);
+        if (!resp) {
+            return MHD_NO;
+        }
+
+        MHD_add_response_header(resp, MHD_HTTP_HEADER_CONTENT_TYPE,
+                "text/html");
+        ret = MHD_queue_response(connection, MHD_HTTP_NOT_FOUND, resp);
+    }
+    MHD_destroy_response(resp);
+    return ret;
+}
+
+static inline int extract_target_from_url(update_con_info_t *cinfo,
+        char *url, char *targetspace, int spacelen, char *methodtype) {
+
     char *targetstart, *targetend, *urlstart;
-    char target[4096];
 
     if (*url != '/') {
-        free(urlcopy);
-        logger(LOG_INFO, "OpenLI: invalid DELETE url from update socket: %s", url);
+        logger(LOG_INFO, "OpenLI: invalid %s url from update socket: %s",
+                methodtype, url);
         snprintf(cinfo->answerstring, 4096,
-                "%s <p>OpenLI provisioner was unable to parse delete instruction from update socket. %s",
-                update_failure_page_start, update_failure_page_end);
+                "%s <p>OpenLI provisioner was unable to parse %s instruction from update socket. %s",
+                update_failure_page_start, methodtype, update_failure_page_end);
         return -1;
     }
 
-    urlstart = urlcopy;
+    urlstart = url;
     while (*urlstart == '/') {
         urlstart ++;
     }
 
     targetstart = strchr(urlstart, '/');
     if (targetstart == NULL) {
-        free(urlcopy);
-        logger(LOG_INFO, "OpenLI: invalid DELETE url from update socket: %s", url);
-        snprintf(cinfo->answerstring, 4096,
-                "%s <p>OpenLI provisioner was unable to parse delete instruction from update socket. %s",
-                update_failure_page_start, update_failure_page_end);
-        return -1;
+        return 0;
     }
 
     while (*(targetstart + 1) == '/') {
@@ -98,17 +190,39 @@ static int update_configuration_delete(update_con_info_t *cinfo,
 
     targetend = strchrnul(targetstart + 1, '/');
 
-    if (targetend - targetstart >= 4096) {
-        free(urlcopy);
-        logger(LOG_INFO, "OpenLI: invalid DELETE url from update socket: %s", url);
+    if (targetend - targetstart >= spacelen) {
+        logger(LOG_INFO, "OpenLI: invalid %s url from update socket: %s",
+                methodtype, url);
         snprintf(cinfo->answerstring, 4096,
-                "%s <p>OpenLI provisioner was unable to parse delete instruction from update socket. %s",
-                update_failure_page_start, update_failure_page_end);
+                "%s <p>OpenLI provisioner was unable to parse %s instruction from update socket. %s",
+                update_failure_page_start, methodtype, update_failure_page_end);
         return -1;
     }
 
-    memcpy(target, targetstart + 1, targetend - targetstart - 1);
-    target[targetend - (targetstart + 1)] = '\0';
+    memcpy(targetspace, targetstart + 1, targetend - targetstart - 1);
+    targetspace[targetend - (targetstart + 1)] = '\0';
+    return 1;
+}
+
+static int update_configuration_delete(update_con_info_t *cinfo,
+        provision_state_t *state, const char *url) {
+
+    int ret = 0;
+    char *urlcopy = strdup(url);
+    char target[4096];
+
+    if ((ret = extract_target_from_url(cinfo, urlcopy, target, 4096, "DELETE"))
+             < 0) {
+        free(urlcopy);
+        return -1;
+    }
+
+    if (ret == 0) {
+        /* no target specified, just return quietly? */
+        free(urlcopy);
+        return ret;
+    }
+    ret = 0;
 
     pthread_mutex_lock(&(state->interceptconf.safelock));
     switch(cinfo->target) {
@@ -144,6 +258,59 @@ static int update_configuration_delete(update_con_info_t *cinfo,
     emit_intercept_config(state->interceptconffile, &(state->interceptconf));
     free(urlcopy);
     return ret;
+}
+
+static json_object *create_get_response(update_con_info_t *cinfo,
+        provision_state_t *state, const char *url) {
+
+    json_object *jobj = NULL;
+    int ret = 0;
+    char *tgtptr = NULL;
+    char *urlcopy = strdup(url);
+    char target[4096];
+
+    if ((ret = extract_target_from_url(cinfo, urlcopy, target, 4096, "GET"))
+            < 0) {
+        free(urlcopy);
+        return NULL;
+    }
+
+    if (ret > 0) {
+        tgtptr = target;
+    }
+    ret = 0;
+
+    pthread_mutex_lock(&(state->interceptconf.safelock));
+    switch(cinfo->target) {
+        case TARGET_AGENCY:
+            jobj = get_agency(cinfo, state, tgtptr);
+            break;
+        case TARGET_SIPSERVER:
+            jobj = get_coreservers(cinfo, state, OPENLI_CORE_SERVER_SIP);
+            break;
+        case TARGET_RADIUSSERVER:
+            jobj = get_coreservers(cinfo, state, OPENLI_CORE_SERVER_RADIUS);
+            break;
+        case TARGET_DEFAULTRADIUS:
+            jobj = get_default_radius(cinfo, state);
+            break;
+        case TARGET_GTPSERVER:
+            jobj = get_coreservers(cinfo, state, OPENLI_CORE_SERVER_GTP);
+            break;
+        case TARGET_IPINTERCEPT:
+            jobj = get_ip_intercept(cinfo, state, tgtptr);
+            break;
+        case TARGET_VOIPINTERCEPT:
+            jobj = get_voip_intercept(cinfo, state, tgtptr);
+            break;
+    }
+
+
+    /* Safe to unlock before emitting, since all accesses should be reads
+     * anyway... */
+    pthread_mutex_unlock(&(state->interceptconf.safelock));
+    free(urlcopy);
+    return jobj;
 }
 
 
@@ -244,6 +411,113 @@ void complete_update_request(void *cls, struct MHD_Connection *conn,
     *con_cls = NULL;
 }
 
+#ifdef HAVE_SQLCIPHER
+static unsigned char *lookup_user_digest(provision_state_t *provstate,
+        char *username, unsigned char *digestres) {
+
+    int rc, step;
+    sqlite3_stmt *res;
+    char *sql = "SELECT username, digesthash FROM authcreds where username = ?";
+    unsigned char *returning = NULL;
+
+    rc = sqlite3_prepare_v2(provstate->authdb, sql, -1, &res, 0);
+    if (rc != SQLITE_OK) {
+        logger(LOG_INFO, "OpenLI: Failed to prepare SQL SELECT to lookup user credentials for %s: %s",
+                username, sqlite3_errmsg(provstate->authdb));
+        return NULL;
+    }
+
+    sqlite3_bind_text(res, 1, username, -1, SQLITE_TRANSIENT);
+
+    memset(digestres, 0, 16);
+
+    step = sqlite3_step(res);
+    if (step == SQLITE_ROW) {
+        memcpy(digestres, sqlite3_column_blob(res, 1), 16);
+        returning = digestres;
+    }
+
+    sqlite3_finalize(res);
+    return returning;
+}
+#endif
+
+static int validate_user_apikey(provision_state_t *provstate,
+        const char *apikey) {
+
+#ifdef HAVE_SQLCIPHER
+    int rc, step;
+    sqlite3_stmt *res;
+    char *sql = "SELECT username, apikey FROM authcreds where apikey = ?";
+
+    rc = sqlite3_prepare_v2(provstate->authdb, sql, -1, &res, 0);
+    if (rc != SQLITE_OK) {
+        logger(LOG_INFO, "OpenLI: Failed to prepare SQL SELECT to lookup API key: %s",
+                sqlite3_errmsg(provstate->authdb));
+        return MHD_NO;
+    }
+
+    sqlite3_bind_text(res, 1, apikey, -1, SQLITE_TRANSIENT);
+
+    step = sqlite3_step(res);
+    if (step == SQLITE_ROW) {
+        logger(LOG_INFO, "OpenLI: User %s has used their API key to send a request via the REST API", sqlite3_column_text(res, 0));
+        sqlite3_finalize(res);
+        return MHD_YES;
+    }
+
+    sqlite3_finalize(res);
+#endif
+    return MHD_NO;
+}
+
+static int authenticate_request(provision_state_t *provstate,
+        struct MHD_Connection *conn, const char *realm) {
+
+    unsigned char digest[16];
+    const char *apikey;
+    char *username;
+    int ret;
+
+
+    username = MHD_digest_auth_get_username(conn);
+    if (username == NULL) {
+        apikey = MHD_lookup_connection_value(conn, MHD_HEADER_KIND,
+                "X-API-KEY");
+        if (apikey != NULL) {
+            if (validate_user_apikey(provstate, apikey) == 0) {
+                logger(LOG_INFO,
+                        "OpenLI: user attempted to provide an invalid API key");
+                return send_auth_failure(conn, realm, MHD_NO);
+            } else {
+                return MHD_YES;
+            }
+        }
+        return send_auth_failure(conn, realm, MHD_NO);
+    }
+
+    ret = MHD_NO;
+#ifdef HAVE_SQLCIPHER
+    if (lookup_user_digest(provstate, username, digest) == NULL) {
+        logger(LOG_INFO,
+                "OpenLI: user '%s' attempted to authenticate against provisioner update service, but they don't exist in the database", username);
+        return send_auth_failure(conn, realm, MHD_NO);
+    }
+
+    ret = MHD_digest_auth_check_digest(conn, realm, username, digest,
+            300);
+#endif
+    if ( ret == MHD_INVALID_NONCE || ret == MHD_NO) {
+        logger(LOG_INFO, "OpenLI: user '%s' failed to authenticate against provisioner update service", username);
+        free(username);
+        return send_auth_failure(conn, realm, ret);
+    }
+    logger(LOG_INFO, "OpenLI: user '%s' successfully authenticated against provisioner update service", username);
+    free(username);
+
+    return MHD_YES;
+}
+
 int handle_update_request(void *cls, struct MHD_Connection *conn,
         const char *url, const char *method, const char *version,
         const char *upload_data, size_t *upload_data_size,
@@ -251,8 +525,20 @@ int handle_update_request(void *cls, struct MHD_Connection *conn,
 
     update_con_info_t *cinfo;
     provision_state_t *provstate = (provision_state_t *)cls;
+    int ret;
+    const char *realm = "provisioner@openli.nz";
 
     if (*con_cls == NULL) {
+        if (provstate->restauthenabled) {
+            ret = authenticate_request(provstate, conn, realm);
+
+            if (ret != MHD_YES) {
+                return send_auth_failure(conn, realm, ret);
+            }
+        } else {
+            /* TODO log all "anonymous" accesses to this socket? */
+        }
+
         cinfo = calloc(1, sizeof(update_con_info_t));
         if (cinfo == NULL) {
             return MHD_NO;
@@ -290,6 +576,7 @@ int handle_update_request(void *cls, struct MHD_Connection *conn,
             snprintf(cinfo->answerstring, 4096, "%s", update_success_page);
         } else {
             cinfo->connectiontype = MICRO_GET;
+            cinfo->answercode = MHD_HTTP_OK;
         }
 
         *con_cls = (void *)cinfo;
@@ -298,7 +585,16 @@ int handle_update_request(void *cls, struct MHD_Connection *conn,
 
 
     if (strcmp(method, "GET") == 0) {
-        return send_http_page(conn, get_not_implemented, MHD_HTTP_OK);
+        json_object *respjson = NULL;
+        cinfo = (update_con_info_t *)(*con_cls);
+
+        respjson = create_get_response(cinfo, provstate, url);
+        ret = send_json_object(conn, respjson);
+
+        if (respjson) {
+            json_object_put(respjson);
+        }
+        return ret;
     } else if (strcmp(method, "POST") == 0 || strcmp(method, "PUT") == 0) {
         cinfo = (update_con_info_t *)(*con_cls);
 

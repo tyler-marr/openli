@@ -49,6 +49,7 @@
 #include "collector_publish.h"
 #include "collector_base.h"
 #include "openli_tls.h"
+#include "radius_hasher.h"
 
 enum {
     OPENLI_PUSH_IPINTERCEPT = 1,
@@ -102,12 +103,20 @@ typedef struct openli_ii_msg {
 
 } PACKED openli_pushed_t;
 
+enum {
+    OPENLI_HASHER_BALANCE,
+    OPENLI_HASHER_BIDIR,
+    OPENLI_HASHER_RADIUS,
+};
+
 typedef struct colinput {
     char *uri;
     int threadcount;
     libtrace_t *trace;
     libtrace_callback_set_t *pktcbs;
 
+    uint8_t hasher_apply;
+    hash_radius_conf_t hashradconf;
     uint8_t report_drops;
     uint8_t running;
     UT_hash_handle hh;
@@ -122,6 +131,8 @@ typedef struct ipv4_target {
 
 typedef struct ipv6_target {
     uint8_t address[16];
+    uint8_t prefixlen;
+    char *prefixstr;
     ipsession_t *intercepts;
 
     UT_hash_handle hh;
@@ -188,11 +199,11 @@ typedef struct colthread_local {
 
 
     /* Current intercepts */
-    ipv6_target_t *activeipv6intercepts;
     ipv4_target_t *activeipv4intercepts;
+    ipv6_target_t *activeipv6intercepts;
 
     rtpstreaminf_t *activertpintercepts;
-    vendmirror_intercept_t *activemirrorintercepts;
+    vendmirror_intercept_list_t *activemirrorintercepts;
 
     staticipsession_t *activestaticintercepts;
 
@@ -216,6 +227,7 @@ typedef struct colthread_local {
 
     patricia_tree_t *staticv4ranges;
     patricia_tree_t *staticv6ranges;
+    patricia_tree_t *dynamicv6ranges;
     static_ipcache_t *staticcache;
 
     ipfrag_reassembler_t *fragreass;
@@ -262,6 +274,7 @@ typedef struct collector_global {
     coreserver_t *jmirrors;
 
     char *sipdebugfile;
+    uint8_t ignore_sdpo_matches;
 
     pthread_t seqproxy_tid;
 
@@ -274,6 +287,7 @@ typedef struct collector_global {
 
     uint8_t encoding_method;
     openli_ssl_config_t sslconf;
+    openli_RMQ_config_t RMQ_conf; 
 
 } collector_global_t;
 

@@ -409,7 +409,6 @@ static inline int enqueue_result(forwarding_thread_data_t *fwd,
         return 0;
     }
 
-
     if (append_message_to_buffer(&(med->buffer), res, 0) == 0) {
         logger(LOG_INFO,
                 "OpenLI: forced to drop mediator %u because we cannot buffer any more records for it -- please investigate now!",
@@ -910,6 +909,10 @@ static inline int forwarder_main_loop(forwarding_thread_data_t *fwd) {
 
         if (dest->waitingforhandshake){
             complete_ssl_handshake(fwd, dest);
+            continue;
+        }
+
+        if (fwd->ampq_conn) {
             continue;
         }
 

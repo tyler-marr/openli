@@ -252,10 +252,7 @@ int check_rmq_status(mediator_collector_t *medcol, active_collector_t *col) {
 					"OpenLI Mediator: RMQ Heartbeat timer expired for %s",
 					cs->ipaddr);
 
-			remove_mediator_fdevent(col->colev);
-			col->colev->fd = -1;
-			amqp_destroy_connection(cs->amqp_state);
-			cs->amqp_state = NULL;
+            return -1;
 			break;
 		case AMQP_STATUS_INVALID_PARAMETER:
 		case AMQP_STATUS_NO_MEMORY:
